@@ -29,12 +29,16 @@
 #define PK_FINS 4
 #define PK_LAMP 5
 #define PK_FOUND 6
+#define PK_BACKLIGHT 7
+#define PK_VIBRATION 8
+
+#define BACKLIGHT_TIMEOUT_MS 60000
 
 // The magic Pebble first appears at this depth (fully upgraded divers only)
 #define PEBBLE_MIN_M 200
 #define PEBBLE_RETRY_M 40
 
-typedef enum { ST_TITLE, ST_PLAYING, ST_PAUSED, ST_GAMEOVER, ST_VICTORY, ST_SHOP } GameState;
+typedef enum { ST_TITLE, ST_PLAYING, ST_PAUSED, ST_GAMEOVER, ST_VICTORY, ST_SHOP, ST_SETTINGS } GameState;
 typedef enum { ENT_NONE, ENT_ROCK, ENT_JELLY, ENT_PEARL, ENT_BUBBLE, ENT_PEBBLE } EntType;
 
 typedef struct {
@@ -86,6 +90,12 @@ static int8_t s_shop_sel;
 static int8_t s_shop_flash;        // "not enough pearls" flash ticks
 static const int32_t SHOP_COST[MAX_LEVEL] = {15, 40, 90, 160, 250};
 
+// settings
+static bool s_backlight_on;
+static bool s_vibration_on = true;
+static int8_t s_settings_sel;      // 0 = backlight row, 1 = vibration row
+static AppTimer *s_backlight_timer;
+
 static GFont s_f14, s_f18b, s_f24b, s_f28b;
 
 // ---------------------------------------------------------------------------
@@ -102,6 +112,8 @@ enum {
   S_DESC_TANK, S_DESC_FINS, S_DESC_LAMP, S_SHOP_HINT,
   S_PAUSED, S_HINT_RESUME,
   S_WIN_TITLE, S_LEGEND,
+  S_HINT_SETTINGS, S_SETTINGS_TITLE, S_OPT_BACKLIGHT, S_OPT_VIBRATION,
+  S_ON, S_OFF, S_SETTINGS_HINT,
   NUM_STRS
 };
 
@@ -117,6 +129,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Paused", "SELECT · resume",
     "You found the magic Pebble!",
     "The magic Pebble waits deep below...",
+    "UP · settings", "Settings", "Backlight always on", "Vibration",
+    "On", "Off", "UP/DOWN · move   SELECT · toggle   BACK · close",
   },
   [L_NL] = {
     "PebbleDiver", "SELECT · duiken", "OMLAAG · winkel",
@@ -129,6 +143,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Gepauzeerd", "SELECT · verder",
     "Je vond de magische Pebble!",
     "De magische Pebble wacht in de diepte...",
+    "OMHOOG · instellingen", "Instellingen", "Verlichting altijd aan", "Trilling",
+    "Aan", "Uit", "OMHOOG/OMLAAG · kiezen   SELECT · wisselen   TERUG · sluiten",
   },
   [L_FR] = {
     "PebbleDiver", "SELECT · plonger", "BAS · boutique",
@@ -141,6 +157,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Pause", "SELECT · reprendre",
     "Pebble magique trouvé !",
     "Le Pebble magique attend au fond...",
+    "HAUT · réglages", "Réglages", "Rétroéclairage allumé", "Vibration",
+    "Activé", "Désactivé", "HAUT/BAS · choisir   SELECT · basculer   RETOUR · fermer",
   },
   [L_DE] = {
     "PebbleDiver", "SELECT · tauchen", "RUNTER · Laden",
@@ -153,6 +171,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Pausiert", "SELECT · weiter",
     "Magischer Pebble gefunden!",
     "Der magische Pebble wartet tief unten...",
+    "HOCH · Einstellungen", "Einstellungen", "Hintergrundlicht an", "Vibration",
+    "An", "Aus", "HOCH/RUNTER · wählen  SELECT · umschalten  ZURÜCK · schließen",
   },
   [L_ES] = {
     "PebbleDiver", "SELECT · bucear", "ABAJO · tienda",
@@ -165,6 +185,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Pausa", "SELECT · seguir",
     "¡Pebble mágico encontrado!",
     "El Pebble mágico espera en el fondo...",
+    "ARRIBA · ajustes", "Ajustes", "Luz de fondo encendida", "Vibración",
+    "Activado", "Desactivado", "ARRIBA/ABAJO · elegir   SELECT · cambiar   ATRÁS · cerrar",
   },
 };
 
@@ -211,6 +233,43 @@ static void load_progress(void) {
   s_fins = persist_read_int(PK_FINS);
   s_lamp = persist_read_int(PK_LAMP);
   s_found = persist_read_bool(PK_FOUND);
+  s_backlight_on = persist_read_bool(PK_BACKLIGHT);
+  s_vibration_on = persist_exists(PK_VIBRATION) ? persist_read_bool(PK_VIBRATION) : true;
+}
+
+static void vibe_short(void)  { if (s_vibration_on) vibes_short_pulse(); }
+static void vibe_long(void)   { if (s_vibration_on) vibes_long_pulse(); }
+static void vibe_double(void) { if (s_vibration_on) vibes_double_pulse(); }
+
+// Backlight "always on" is not literally forever — it forces the light on
+// while the player is actively pressing buttons, then lets it revert to the
+// watch's normal automatic behavior after BACKLIGHT_TIMEOUT_MS idle, so the
+// setting can't quietly drain the battery if the watch is left sitting.
+static void backlight_timeout(void *data) {
+  s_backlight_timer = NULL;
+  light_enable(false);
+}
+
+static void backlight_touch(void) {
+  if (!s_backlight_on) return;
+  light_enable(true);
+  if (s_backlight_timer) {
+    app_timer_reschedule(s_backlight_timer, BACKLIGHT_TIMEOUT_MS);
+  } else {
+    s_backlight_timer = app_timer_register(BACKLIGHT_TIMEOUT_MS, backlight_timeout, NULL);
+  }
+}
+
+static void backlight_stop_timer(void) {
+  if (s_backlight_timer) {
+    app_timer_cancel(s_backlight_timer);
+    s_backlight_timer = NULL;
+  }
+}
+
+static void backlight_disable(void) {
+  backlight_stop_timer();
+  light_enable(false);
 }
 
 static bool all_upgrades_max(void) {
@@ -277,7 +336,7 @@ static void end_run(bool drowned) {
   finish_run();
   s_state = drowned ? ST_GAMEOVER : ST_TITLE;
   if (drowned) {
-    vibes_long_pulse();
+    vibe_long();
     s_go_lock = true;
     app_timer_register(1000, go_unlock, NULL);
   }
@@ -288,7 +347,7 @@ static void win_run(void) {
   s_found = true;
   finish_run();
   s_state = ST_VICTORY;
-  vibes_double_pulse();
+  vibe_double();
   s_go_lock = true;
   app_timer_register(1000, go_unlock, NULL);
   layer_mark_dirty(s_layer);
@@ -377,7 +436,7 @@ static void game_tick(void *data) {
   }
   if (!s_o2_warned && s_oxygen_ms < 10000) {
     s_o2_warned = true;
-    vibes_short_pulse();
+    vibe_short();
   }
   if (s_o2_warned && s_oxygen_ms >= 12000) s_o2_warned = false;
 
@@ -470,7 +529,7 @@ static void game_tick(void *data) {
       } else if (s_invuln == 0) {
         s_oxygen_ms -= O2_HIT_MS;
         s_invuln = 45;
-        vibes_short_pulse();
+        vibe_short();
         if (s_oxygen_ms <= 0) {
           s_oxygen_ms = 0;
           end_run(true);
@@ -673,6 +732,7 @@ static void draw_title(GContext *ctx, GRect b) {
 
   draw_center_text(ctx, S(S_HINT_DIVE), s_f18b, 128, 24, b, GColorWhite);
   draw_center_text(ctx, S(S_HINT_SHOP), s_f18b, 150, 24, b, GColorWhite);
+  draw_center_text(ctx, S(S_HINT_SETTINGS), s_f14, 176, 20, b, GColorOxfordBlue);
 
   char buf[48];
   snprintf(buf, sizeof(buf), S(S_STATS),
@@ -791,6 +851,40 @@ static void draw_victory(GContext *ctx, GRect b) {
   }
 }
 
+static void draw_settings(GContext *ctx, GRect b) {
+  graphics_context_set_fill_color(ctx, GColorOxfordBlue);
+  graphics_fill_rect(ctx, b, 0, GCornerNone);
+
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, S(S_SETTINGS_TITLE), s_f24b, GRect(8, 6, b.size.w - 16, 30),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  const char *labels[2] = {S(S_OPT_BACKLIGHT), S(S_OPT_VIBRATION)};
+  bool values[2] = {s_backlight_on, s_vibration_on};
+
+  for (int i = 0; i < 2; i++) {
+    int16_t y = 52 + i * 62;
+    GRect row = GRect(6, y, b.size.w - 12, 52);
+    graphics_context_set_fill_color(ctx, i == s_settings_sel ? GColorCobaltBlue : GColorDukeBlue);
+    graphics_fill_rect(ctx, row, 4, GCornersAll);
+    if (i == s_settings_sel) {
+      graphics_context_set_stroke_color(ctx, GColorWhite);
+      graphics_draw_round_rect(ctx, row, 4);
+    }
+
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, labels[i], s_f18b, GRect(row.origin.x + 8, y + 15, row.size.w - 76, 22),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+    graphics_context_set_text_color(ctx, values[i] ? GColorGreen : GColorLightGray);
+    graphics_draw_text(ctx, values[i] ? S(S_ON) : S(S_OFF), s_f18b,
+                       GRect(row.origin.x + row.size.w - 62, y + 15, 56, 22),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+  }
+
+  draw_center_text(ctx, S(S_SETTINGS_HINT), s_f14, b.size.h - 34, 32, b, GColorLightGray);
+}
+
 static void layer_update(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   switch (s_state) {
@@ -816,6 +910,9 @@ static void layer_update(Layer *layer, GContext *ctx) {
     case ST_SHOP:
       draw_shop(ctx, b);
       break;
+    case ST_SETTINGS:
+      draw_settings(ctx, b);
+      break;
   }
 }
 
@@ -836,18 +933,35 @@ static void try_buy(void) {
   if (s_pearls < cost) {
     s_shop_flash = 1;
     app_timer_register(600, shop_flash_end, NULL);
-    vibes_double_pulse();
+    vibe_double();
     layer_mark_dirty(s_layer);
     return;
   }
   s_pearls -= cost;
   (*lvl[(int)s_shop_sel])++;
   save_progress();
-  vibes_short_pulse();
+  vibe_short();
+  layer_mark_dirty(s_layer);
+}
+
+static void toggle_current_setting(void) {
+  if (s_settings_sel == 0) {
+    s_backlight_on = !s_backlight_on;
+    if (s_backlight_on) {
+      backlight_touch();
+    } else {
+      backlight_disable();
+    }
+    persist_write_bool(PK_BACKLIGHT, s_backlight_on);
+  } else {
+    s_vibration_on = !s_vibration_on;
+    persist_write_bool(PK_VIBRATION, s_vibration_on);
+  }
   layer_mark_dirty(s_layer);
 }
 
 static void select_raw_down(ClickRecognizerRef rec, void *ctx) {
+  backlight_touch();
   switch (s_state) {
     case ST_PLAYING:
       s_thrust = true;
@@ -869,6 +983,9 @@ static void select_raw_down(ClickRecognizerRef rec, void *ctx) {
     case ST_SHOP:
       try_buy();
       break;
+    case ST_SETTINGS:
+      toggle_current_setting();
+      break;
   }
 }
 
@@ -877,13 +994,32 @@ static void select_raw_up(ClickRecognizerRef rec, void *ctx) {
 }
 
 static void up_click(ClickRecognizerRef rec, void *ctx) {
-  if (s_state == ST_SHOP && s_shop_sel > 0) {
-    s_shop_sel--;
-    layer_mark_dirty(s_layer);
+  backlight_touch();
+  switch (s_state) {
+    case ST_SHOP:
+      if (s_shop_sel > 0) {
+        s_shop_sel--;
+        layer_mark_dirty(s_layer);
+      }
+      break;
+    case ST_TITLE:
+      s_settings_sel = 0;
+      s_state = ST_SETTINGS;
+      layer_mark_dirty(s_layer);
+      break;
+    case ST_SETTINGS:
+      if (s_settings_sel > 0) {
+        s_settings_sel--;
+        layer_mark_dirty(s_layer);
+      }
+      break;
+    default:
+      break;
   }
 }
 
 static void down_raw_down(ClickRecognizerRef rec, void *ctx) {
+  backlight_touch();
   switch (s_state) {
     case ST_PLAYING:
       s_dive = true;
@@ -903,6 +1039,12 @@ static void down_raw_down(ClickRecognizerRef rec, void *ctx) {
         layer_mark_dirty(s_layer);
       }
       break;
+    case ST_SETTINGS:
+      if (s_settings_sel < 1) {
+        s_settings_sel++;
+        layer_mark_dirty(s_layer);
+      }
+      break;
     default:
       break;
   }
@@ -913,6 +1055,7 @@ static void down_raw_up(ClickRecognizerRef rec, void *ctx) {
 }
 
 static void back_click(ClickRecognizerRef rec, void *ctx) {
+  backlight_touch();
   switch (s_state) {
     case ST_PLAYING:
       s_state = ST_PAUSED;
@@ -927,6 +1070,7 @@ static void back_click(ClickRecognizerRef rec, void *ctx) {
     case ST_GAMEOVER:
     case ST_VICTORY:
     case ST_SHOP:
+    case ST_SETTINGS:
       s_state = ST_TITLE;
       layer_mark_dirty(s_layer);
       break;
@@ -972,6 +1116,7 @@ static void init(void) {
   srand(time(NULL));
   pick_language();
   load_progress();
+  if (s_backlight_on) backlight_touch();
 
   s_f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
   s_f18b = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
@@ -989,6 +1134,8 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  backlight_stop_timer();
+  light_enable(false);
   stop_timer();
   app_focus_service_unsubscribe();
   save_progress();
