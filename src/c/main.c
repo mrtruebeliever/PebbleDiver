@@ -29,10 +29,13 @@
 #define PK_FINS 4
 #define PK_LAMP 5
 #define PK_FOUND 6
-#define PK_BACKLIGHT 7
+#define PK_BACKLIGHT 7      // legacy bool; superseded by PK_BL_MODE
 #define PK_VIBRATION 8
+#define PK_SOUND 9          // legacy on/off bool; superseded by PK_SOUND_VOL
+#define PK_BL_MODE 10
+#define PK_SOUND_VOL 11
 
-#define BACKLIGHT_TIMEOUT_MS 60000
+#define BL_TIMEOUT_MS 30000
 
 // The magic Pebble first appears at this depth (fully upgraded divers only)
 #define PEBBLE_MIN_M 200
@@ -40,6 +43,9 @@
 
 typedef enum { ST_TITLE, ST_PLAYING, ST_PAUSED, ST_GAMEOVER, ST_VICTORY, ST_SHOP, ST_SETTINGS } GameState;
 typedef enum { ENT_NONE, ENT_ROCK, ENT_JELLY, ENT_PEARL, ENT_BUBBLE, ENT_PEBBLE } EntType;
+// Backlight: off (system default), timeout (lit while interacting, then dims),
+// or always (forced 100% on). Mirrors Switchback's 3-state model.
+typedef enum { BL_OFF, BL_TIMED, BL_ALWAYS, NUM_BL_MODES } BacklightMode;
 
 typedef struct {
   EntType type;
@@ -91,12 +97,14 @@ static int8_t s_shop_flash;        // "not enough pearls" flash ticks
 static const int32_t SHOP_COST[MAX_LEVEL] = {15, 40, 90, 160, 250};
 
 // settings
-static bool s_backlight_on;
+static int8_t s_bl_mode = BL_OFF;  // BacklightMode
 static bool s_vibration_on = true;
-static int8_t s_settings_sel;      // 0 = backlight row, 1 = vibration row
+static int8_t s_sound_vol = 1;     // 0=Off 1=Soft 2=Normal 3=Loud (chiptune SFX)
+static int8_t s_settings_sel;      // settings-menu row
+static bool s_reset_armed;         // "Reset save" needs a confirming second press
 static AppTimer *s_backlight_timer;
 
-static GFont s_f14, s_f18b, s_f24b, s_f28b;
+static GFont s_f14, s_f18, s_f18b, s_f24b, s_f28b;
 
 // ---------------------------------------------------------------------------
 // Localization — device language via i18n_get_system_locale(), English
@@ -114,6 +122,9 @@ enum {
   S_WIN_TITLE, S_LEGEND,
   S_HINT_SETTINGS, S_SETTINGS_TITLE, S_OPT_BACKLIGHT, S_OPT_VIBRATION,
   S_ON, S_OFF, S_SETTINGS_HINT,
+  S_OPT_SOUND, S_OPT_RESET, S_RESET_CONFIRM, S_BL_TIMED, S_BL_ALWAYS,
+  S_HINT_CONTROLS,
+  S_SND_SOFT, S_SND_NORMAL, S_SND_LOUD,
   NUM_STRS
 };
 
@@ -129,8 +140,11 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Paused", "SELECT · resume",
     "You found the magic Pebble!",
     "The magic Pebble waits deep below...",
-    "UP · settings", "Settings", "Backlight always on", "Vibration",
+    "UP · settings", "Settings", "Backlight", "Vibration",
     "On", "Off", "UP/DOWN · move   SELECT · toggle   BACK · close",
+    "Sound", "Reset save", "Press again to erase", "Timeout", "Always",
+    "SELECT up · DOWN dive",
+    "Soft", "Normal", "Loud",
   },
   [L_NL] = {
     "PebbleDiver", "SELECT · duiken", "OMLAAG · winkel",
@@ -143,8 +157,11 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Gepauzeerd", "SELECT · verder",
     "Je vond de magische Pebble!",
     "De magische Pebble wacht in de diepte...",
-    "OMHOOG · instellingen", "Instellingen", "Verlichting altijd aan", "Trilling",
+    "OMHOOG · instellingen", "Instellingen", "Verlichting", "Trilling",
     "Aan", "Uit", "OMHOOG/OMLAAG · kiezen   SELECT · wisselen   TERUG · sluiten",
+    "Geluid", "Wissen", "Nogmaals om te wissen", "Time-out", "Altijd",
+    "SELECT omhoog · OMLAAG duik",
+    "Zacht", "Normaal", "Luid",
   },
   [L_FR] = {
     "PebbleDiver", "SELECT · plonger", "BAS · boutique",
@@ -157,8 +174,11 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Pause", "SELECT · reprendre",
     "Pebble magique trouvé !",
     "Le Pebble magique attend au fond...",
-    "HAUT · réglages", "Réglages", "Rétroéclairage allumé", "Vibration",
+    "HAUT · réglages", "Réglages", "Éclairage", "Vibration",
     "Activé", "Désactivé", "HAUT/BAS · choisir   SELECT · basculer   RETOUR · fermer",
+    "Son", "Effacer", "Encore pour effacer", "Minuteur", "Toujours",
+    "SELECT monter · BAS plonger",
+    "Doux", "Normal", "Fort",
   },
   [L_DE] = {
     "PebbleDiver", "SELECT · tauchen", "RUNTER · Laden",
@@ -171,8 +191,11 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Pausiert", "SELECT · weiter",
     "Magischer Pebble gefunden!",
     "Der magische Pebble wartet tief unten...",
-    "HOCH · Einstellungen", "Einstellungen", "Hintergrundlicht an", "Vibration",
+    "HOCH · Einstellungen", "Einstellungen", "Beleuchtung", "Vibration",
     "An", "Aus", "HOCH/RUNTER · wählen  SELECT · umschalten  ZURÜCK · schließen",
+    "Ton", "Löschen", "Nochmal zum Löschen", "Zeitlimit", "Immer",
+    "SELECT hoch · RUNTER tauchen",
+    "Leise", "Normal", "Laut",
   },
   [L_ES] = {
     "PebbleDiver", "SELECT · bucear", "ABAJO · tienda",
@@ -185,8 +208,11 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Pausa", "SELECT · seguir",
     "¡Pebble mágico encontrado!",
     "El Pebble mágico espera en el fondo...",
-    "ARRIBA · ajustes", "Ajustes", "Luz de fondo encendida", "Vibración",
+    "ARRIBA · ajustes", "Ajustes", "Luz", "Vibración",
     "Activado", "Desactivado", "ARRIBA/ABAJO · elegir   SELECT · cambiar   ATRÁS · cerrar",
+    "Sonido", "Borrar", "Otra vez para borrar", "Con tiempo", "Siempre",
+    "SELECT sube · ABAJO bucea",
+    "Bajo", "Normal", "Alto",
   },
 };
 
@@ -233,30 +259,79 @@ static void load_progress(void) {
   s_fins = persist_read_int(PK_FINS);
   s_lamp = persist_read_int(PK_LAMP);
   s_found = persist_read_bool(PK_FOUND);
-  s_backlight_on = persist_read_bool(PK_BACKLIGHT);
+  // Migrate the old on/off backlight bool to the 3-state mode on first run.
+  if (persist_exists(PK_BL_MODE)) {
+    s_bl_mode = persist_read_int(PK_BL_MODE);
+  } else {
+    s_bl_mode = persist_read_bool(PK_BACKLIGHT) ? BL_TIMED : BL_OFF;
+  }
+  if (s_bl_mode < 0 || s_bl_mode >= NUM_BL_MODES) s_bl_mode = BL_OFF;
   s_vibration_on = persist_exists(PK_VIBRATION) ? persist_read_bool(PK_VIBRATION) : true;
+  // Migrate the old on/off sound bool to the 4-level volume. It only ever said
+  // "on", never "loud", so it lands on the same Soft the fresh install gets.
+  if (persist_exists(PK_SOUND_VOL)) s_sound_vol = persist_read_int(PK_SOUND_VOL);
+  else if (persist_exists(PK_SOUND)) s_sound_vol = persist_read_bool(PK_SOUND) ? 1 : 0;
+  else s_sound_vol = 1;
+  if (s_sound_vol < 0 || s_sound_vol > 3) s_sound_vol = 1;
 }
 
 static void vibe_short(void)  { if (s_vibration_on) vibes_short_pulse(); }
 static void vibe_long(void)   { if (s_vibration_on) vibes_long_pulse(); }
 static void vibe_double(void) { if (s_vibration_on) vibes_double_pulse(); }
 
-// Backlight "always on" is not literally forever — it forces the light on
-// while the player is actively pressing buttons, then lets it revert to the
-// watch's normal automatic behavior after BACKLIGHT_TIMEOUT_MS idle, so the
-// setting can't quietly drain the battery if the watch is left sitting.
+// ---------------------------------------------------------------------------
+// Sound effects (PT2 speaker). Short chiptune blips, all gated by the Sound
+// setting. MIDI notes: 60 = C4; velocity 0 = use the call's global volume.
+// ---------------------------------------------------------------------------
+#define SFX_VOL 80
+#define SFX_N(a) (sizeof(a) / sizeof((a)[0]))
+#define SQ SpeakerWaveformSquare
+#define TR_ SpeakerWaveformTriangle
+
+static const SpeakerNote SFX_PEARL[]  = {{83, SQ, 45, 0, 0}, {90, SQ, 90, 0, 0}};                        // B5 -> F#6
+static const SpeakerNote SFX_BUBBLE[] = {{79, TR_, 45, 0, 0}, {86, TR_, 95, 0, 0}};                      // airy rise
+static const SpeakerNote SFX_WIN[]    = {{72, SQ, 55, 0, 0}, {76, SQ, 55, 0, 0}, {79, SQ, 55, 0, 0}, {84, SQ, 160, 0, 0}}; // fanfare
+static const SpeakerNote SFX_DROWN[]  = {{72, SQ, 120, 0, 0}, {68, SQ, 120, 0, 0}, {64, SQ, 120, 0, 0}, {59, SQ, 260, 0, 0}}; // descending
+static const SpeakerNote SFX_BUY[]    = {{79, TR_, 60, 0, 0}, {84, TR_, 130, 0, 0}};                     // confirm
+static const SpeakerNote SFX_DENY[]   = {{55, SQ, 90, 0, 0}, {51, SQ, 150, 0, 0}};                       // low error
+
+// Master volume per Sound setting (Off/Soft/Normal/Loud). Each SFX keeps its own
+// tuned base loudness; sv() scales it by the chosen level, so Loud == the
+// original tuning and lower levels attenuate everything proportionally.
+static const uint8_t SND_VOL[4] = {0, 35, 70, 100};
+static uint8_t sv(uint8_t base) { return (uint16_t)base * SND_VOL[s_sound_vol & 3] / 100; }
+
+// Quiet Time is the watch saying "not now" — a game blipping through it is
+// exactly what the user turned it on to stop. The setting stays where it was;
+// this only silences the speaker while the mode is active.
+static bool sfx_enabled(void) { return s_sound_vol && !quiet_time_is_active(); }
+
+static void sfx_play(const SpeakerNote *n, uint32_t c) { if (sfx_enabled()) speaker_play_notes(n, c, sv(SFX_VOL)); }
+static void sfx_pearl(void)  { sfx_play(SFX_PEARL,  SFX_N(SFX_PEARL)); }
+static void sfx_bubble(void) { sfx_play(SFX_BUBBLE, SFX_N(SFX_BUBBLE)); }
+static void sfx_win(void)    { sfx_play(SFX_WIN,    SFX_N(SFX_WIN)); }
+static void sfx_drown(void)  { sfx_play(SFX_DROWN,  SFX_N(SFX_DROWN)); }
+static void sfx_buy(void)    { sfx_play(SFX_BUY,    SFX_N(SFX_BUY)); }
+static void sfx_deny(void)   { sfx_play(SFX_DENY,   SFX_N(SFX_DENY)); }
+static void sfx_hit(void)    { if (sfx_enabled()) speaker_play_tone(150, 130, sv(92), SQ); }
+static void sfx_low_o2(void) { if (sfx_enabled()) speaker_play_tone(440, 120, sv(80), SQ); }
+
+// Backlight. ALWAYS forces the light on until we release it; TIMED keeps it lit
+// while the player interacts and auto-dims after BL_TIMEOUT_MS of stillness;
+// OFF hands back to the watch's normal auto-dim.
 static void backlight_timeout(void *data) {
   s_backlight_timer = NULL;
   light_enable(false);
 }
 
+// Push the auto-off further out (or start it). No-op unless in TIMED mode.
 static void backlight_touch(void) {
-  if (!s_backlight_on) return;
+  if (s_bl_mode != BL_TIMED) return;
   light_enable(true);
   if (s_backlight_timer) {
-    app_timer_reschedule(s_backlight_timer, BACKLIGHT_TIMEOUT_MS);
+    app_timer_reschedule(s_backlight_timer, BL_TIMEOUT_MS);
   } else {
-    s_backlight_timer = app_timer_register(BACKLIGHT_TIMEOUT_MS, backlight_timeout, NULL);
+    s_backlight_timer = app_timer_register(BL_TIMEOUT_MS, backlight_timeout, NULL);
   }
 }
 
@@ -267,9 +342,13 @@ static void backlight_stop_timer(void) {
   }
 }
 
-static void backlight_disable(void) {
+static void apply_backlight(void) {
   backlight_stop_timer();
-  light_enable(false);
+  switch (s_bl_mode) {
+    case BL_ALWAYS: light_enable(true); break;
+    case BL_TIMED:  backlight_touch(); break;
+    default:        light_enable(false); break;
+  }
 }
 
 static bool all_upgrades_max(void) {
@@ -337,6 +416,7 @@ static void end_run(bool drowned) {
   s_state = drowned ? ST_GAMEOVER : ST_TITLE;
   if (drowned) {
     vibe_long();
+    sfx_drown();
     s_go_lock = true;
     app_timer_register(1000, go_unlock, NULL);
   }
@@ -348,6 +428,7 @@ static void win_run(void) {
   finish_run();
   s_state = ST_VICTORY;
   vibe_double();
+  sfx_win();
   s_go_lock = true;
   app_timer_register(1000, go_unlock, NULL);
   layer_mark_dirty(s_layer);
@@ -437,6 +518,7 @@ static void game_tick(void *data) {
   if (!s_o2_warned && s_oxygen_ms < 10000) {
     s_o2_warned = true;
     vibe_short();
+    sfx_low_o2();
   }
   if (s_o2_warned && s_oxygen_ms >= 12000) s_o2_warned = false;
 
@@ -521,15 +603,18 @@ static void game_tick(void *data) {
         return;
       } else if (e->type == ENT_PEARL) {
         s_run_pearls++;
+        sfx_pearl();
         e->type = ENT_NONE;
       } else if (e->type == ENT_BUBBLE) {
         s_oxygen_ms += O2_BUBBLE_MS;
         if (s_oxygen_ms > s_max_oxygen_ms) s_oxygen_ms = s_max_oxygen_ms;
+        sfx_bubble();
         e->type = ENT_NONE;
       } else if (s_invuln == 0) {
         s_oxygen_ms -= O2_HIT_MS;
         s_invuln = 45;
         vibe_short();
+        sfx_hit();
         if (s_oxygen_ms <= 0) {
           s_oxygen_ms = 0;
           end_run(true);
@@ -615,6 +700,14 @@ static void draw_entity(GContext *ctx, Entity *e, GColor water) {
       graphics_context_set_fill_color(ctx, GColorDarkGray);
       graphics_fill_circle(ctx, GPoint(x, e->y), e->r);
       graphics_fill_circle(ctx, GPoint(x + e->r / 2, e->y + 2), e->r - 3);
+      // Two-tone on purpose. A dark-grey rock against the 90-150 m water
+      // (CobaltBlue) measures 1.02:1 -- the thing that ends your run is
+      // invisible exactly where the scroll is fastest. No single flat colour
+      // fixes it, because the water spans #00AAFF to #0000AA; but where the
+      // light outline is weakest (the shallow cyan band) the dark body is at
+      // its strongest, so the pair reads at every depth.
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_draw_circle(ctx, GPoint(x, e->y), e->r);
       graphics_context_set_fill_color(ctx, GColorLightGray);
       graphics_fill_circle(ctx, GPoint(x - e->r / 3, e->y - e->r / 3), 2);
       break;
@@ -706,6 +799,18 @@ static void draw_game(GContext *ctx, GRect b) {
 
   draw_diver(ctx, DIVER_X, s_diver_y_fp >> FP);
   draw_hud(ctx, b);
+
+  // First-run onboarding: a control hint just under the HUD for the opening
+  // stretch of a player's very first dive (no record yet), then it fades out.
+  if (s_best_m == 0 && depth_m() < 12) {
+    GRect box = GRect(6, HUD_H + 4, b.size.w - 12, 22);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, box, 4, GCornersAll);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, S(S_HINT_CONTROLS), s_f14,
+                       GRect(box.origin.x + 2, box.origin.y + 2, box.size.w - 4, 18),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  }
 }
 
 static void draw_center_text(GContext *ctx, const char *text, GFont font,
@@ -715,29 +820,47 @@ static void draw_center_text(GContext *ctx, const char *text, GFont font,
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
+// Replace a " · " / "  ·  " separator (space(s) + U+00B7 + space(s)) with a
+// single newline, trimming the spaces on both sides, so a stat line becomes two
+// clean centred lines — lets us use a bigger font without clipping the width.
+static void split_middot(char *s) {
+  for (char *p = s; p[0]; p++) {
+    if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xB7) {
+      char *a = p;                              // walk back over leading spaces
+      while (a > s && a[-1] == ' ') a--;
+      char *b2 = p + 2;                         // walk forward over trailing spaces
+      while (*b2 == ' ') b2++;
+      *a = '\n';
+      memmove(a + 1, b2, strlen(b2) + 1);
+      return;
+    }
+  }
+}
+
 static void draw_title(GContext *ctx, GRect b) {
   graphics_context_set_fill_color(ctx, GColorVividCerulean);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   graphics_context_set_fill_color(ctx, GColorCeleste);
   graphics_fill_rect(ctx, GRect(0, 0, b.size.w, 4), 0, GCornerNone);
 
-  draw_center_text(ctx, S(S_TITLE), s_f28b, 14, 70, b, GColorWhite);
-
-  draw_diver(ctx, b.size.w / 2, 105);
-  graphics_context_set_stroke_color(ctx, GColorCeleste);
-  graphics_draw_circle(ctx, GPoint(b.size.w / 2 + 18, 92), 2);
-  graphics_draw_circle(ctx, GPoint(b.size.w / 2 + 24, 84), 3);
-  // Trophy: the diver carries the magic Pebble once it has been found
-  if (s_found) draw_magic_pebble(ctx, GPoint(b.size.w / 2 - 28, 105), 5);
-
-  draw_center_text(ctx, S(S_HINT_DIVE), s_f18b, 128, 24, b, GColorWhite);
-  draw_center_text(ctx, S(S_HINT_SHOP), s_f18b, 150, 24, b, GColorWhite);
-  draw_center_text(ctx, S(S_HINT_SETTINGS), s_f14, 176, 20, b, GColorOxfordBlue);
+  draw_center_text(ctx, S(S_TITLE), s_f28b, 10, 44, b, GColorWhite);
 
   char buf[48];
-  snprintf(buf, sizeof(buf), S(S_STATS),
-           (long)s_best_m, (long)s_pearls);
-  draw_center_text(ctx, buf, s_f14, b.size.h - 24, 20, b, GColorOxfordBlue);
+  // Record depth + pearl bank just under the title, split onto two lines.
+  snprintf(buf, sizeof(buf), S(S_STATS), (long)s_best_m, (long)s_pearls);
+  split_middot(buf);
+  draw_center_text(ctx, buf, s_f18b, 46, 42, b, GColorWhite);
+
+  draw_diver(ctx, b.size.w / 2, 108);
+  graphics_context_set_stroke_color(ctx, GColorCeleste);
+  graphics_draw_circle(ctx, GPoint(b.size.w / 2 + 18, 95), 2);
+  graphics_draw_circle(ctx, GPoint(b.size.w / 2 + 24, 87), 3);
+  // Trophy: the diver carries the magic Pebble once it has been found
+  if (s_found) draw_magic_pebble(ctx, GPoint(b.size.w / 2 - 28, 108), 5);
+
+  draw_center_text(ctx, S(S_HINT_DIVE), s_f18b, 130, 24, b, GColorWhite);
+  draw_center_text(ctx, S(S_HINT_SHOP), s_f18b, 152, 24, b, GColorWhite);
+  draw_center_text(ctx, S(S_HINT_SETTINGS), s_f18b, 176, 22, b, GColorWhite);
 }
 
 static void draw_gameover(GContext *ctx, GRect b) {
@@ -795,7 +918,7 @@ static void draw_shop(GContext *ctx, GRect b) {
     }
 
     graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, names[i], s_f18b, GRect(card.origin.x + 6, y, 130, 22),
+    graphics_draw_text(ctx, names[i], s_f18b, GRect(card.origin.x + 6, y + 2, 136, 22),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, GColorCeleste);
     graphics_draw_text(ctx, descs[i], s_f14, GRect(card.origin.x + 6, y + 19, 130, 18),
@@ -829,7 +952,7 @@ static void draw_shop(GContext *ctx, GRect b) {
 
   // Once everything is bought, the shop whispers about the legend instead
   draw_center_text(ctx, all_upgrades_max() ? S(S_LEGEND) : S(S_SHOP_HINT), s_f14,
-                   b.size.h - 18, 16, b,
+                   b.size.h - 34, 32, b,
                    all_upgrades_max() ? GColorCeleste : GColorLightGray);
 }
 
@@ -851,38 +974,69 @@ static void draw_victory(GContext *ctx, GRect b) {
   }
 }
 
+#define NUM_SETTINGS 4
+
 static void draw_settings(GContext *ctx, GRect b) {
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
 
   graphics_context_set_text_color(ctx, GColorWhite);
-  graphics_draw_text(ctx, S(S_SETTINGS_TITLE), s_f24b, GRect(8, 6, b.size.w - 16, 30),
+  graphics_draw_text(ctx, S(S_SETTINGS_TITLE), s_f24b, GRect(8, 4, b.size.w - 16, 30),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  const char *labels[2] = {S(S_OPT_BACKLIGHT), S(S_OPT_VIBRATION)};
-  bool values[2] = {s_backlight_on, s_vibration_on};
+  const char *labels[NUM_SETTINGS] = {
+    S(S_OPT_BACKLIGHT), S(S_OPT_VIBRATION), S(S_OPT_SOUND), S(S_OPT_RESET) };
 
-  for (int i = 0; i < 2; i++) {
-    int16_t y = 52 + i * 62;
-    GRect row = GRect(6, y, b.size.w - 12, 52);
-    graphics_context_set_fill_color(ctx, i == s_settings_sel ? GColorCobaltBlue : GColorDukeBlue);
-    graphics_fill_rect(ctx, row, 4, GCornersAll);
+  for (int i = 0; i < NUM_SETTINGS; i++) {
+    int16_t y = 40 + i * 34;
+    GRect row = GRect(6, y, b.size.w - 12, 30);
     if (i == s_settings_sel) {
+      graphics_context_set_fill_color(ctx, GColorCobaltBlue);
+      graphics_fill_rect(ctx, row, 4, GCornersAll);
       graphics_context_set_stroke_color(ctx, GColorWhite);
       graphics_draw_round_rect(ctx, row, 4);
     }
 
+    // Reset row: when armed, the whole row becomes a red confirm prompt. The red
+    // goes in the bar rather than the text — red on the cobalt selection bar was
+    // the lowest-contrast pair on screen, in the one state that must be read.
+    if (i == 3 && s_reset_armed) {
+      graphics_context_set_fill_color(ctx, GColorRed);
+      graphics_fill_rect(ctx, row, 4, GCornersAll);
+      graphics_context_set_stroke_color(ctx, GColorWhite);
+      graphics_draw_round_rect(ctx, row, 4);
+      graphics_context_set_text_color(ctx, GColorWhite);
+      graphics_draw_text(ctx, S(S_RESET_CONFIRM), s_f18, GRect(row.origin.x + 8, y + 4, row.size.w - 16, 22),
+                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      continue;
+    }
+
     graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, labels[i], s_f18b, GRect(row.origin.x + 8, y + 15, row.size.w - 76, 22),
+    graphics_draw_text(ctx, labels[i], s_f18b, GRect(row.origin.x + 8, y + 4, row.size.w - 76, 22),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    graphics_context_set_text_color(ctx, values[i] ? GColorGreen : GColorLightGray);
-    graphics_draw_text(ctx, values[i] ? S(S_ON) : S(S_OFF), s_f18b,
-                       GRect(row.origin.x + row.size.w - 62, y + 15, 56, 22),
+    if (i == 3) continue;   // Reset has no value column
+
+    const char *vt;
+    bool active;
+    if (i == 0) {   // Backlight: 3-state
+      vt = (s_bl_mode == BL_ALWAYS) ? S(S_BL_ALWAYS)
+         : (s_bl_mode == BL_TIMED) ? S(S_BL_TIMED) : S(S_OFF);
+      active = (s_bl_mode != BL_OFF);
+    } else if (i == 1) {
+      vt = s_vibration_on ? S(S_ON) : S(S_OFF);
+      active = s_vibration_on;
+    } else {   // Sound: 4-level volume
+      vt = s_sound_vol == 0 ? S(S_OFF) : s_sound_vol == 1 ? S(S_SND_SOFT)
+         : s_sound_vol == 2 ? S(S_SND_NORMAL) : S(S_SND_LOUD);
+      active = s_sound_vol > 0;
+    }
+    graphics_context_set_text_color(ctx, active ? GColorGreen : GColorLightGray);
+    graphics_draw_text(ctx, vt, s_f14, GRect(row.origin.x + row.size.w - 68, y + 6, 62, 20),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
   }
 
-  draw_center_text(ctx, S(S_SETTINGS_HINT), s_f14, b.size.h - 34, 32, b, GColorLightGray);
+  draw_center_text(ctx, S(S_SETTINGS_HINT), s_f14, b.size.h - 38, 36, b, GColorLightGray);
 }
 
 static void layer_update(Layer *layer, GContext *ctx) {
@@ -934,6 +1088,7 @@ static void try_buy(void) {
     s_shop_flash = 1;
     app_timer_register(600, shop_flash_end, NULL);
     vibe_double();
+    sfx_deny();
     layer_mark_dirty(s_layer);
     return;
   }
@@ -941,21 +1096,44 @@ static void try_buy(void) {
   (*lvl[(int)s_shop_sel])++;
   save_progress();
   vibe_short();
+  sfx_buy();
   layer_mark_dirty(s_layer);
 }
 
+// Wipe run progress — pearls, best depth, upgrades and the found-Pebble trophy —
+// while leaving the player's settings untouched.
+static void reset_save(void) {
+  s_pearls = 0;
+  s_best_m = 0;
+  s_tank = 0; s_fins = 0; s_lamp = 0;
+  s_found = false;
+  s_new_record = false;
+  save_progress();
+  vibe_short();
+  sfx_deny();
+}
+
 static void toggle_current_setting(void) {
-  if (s_settings_sel == 0) {
-    s_backlight_on = !s_backlight_on;
-    if (s_backlight_on) {
-      backlight_touch();
-    } else {
-      backlight_disable();
-    }
-    persist_write_bool(PK_BACKLIGHT, s_backlight_on);
-  } else {
-    s_vibration_on = !s_vibration_on;
-    persist_write_bool(PK_VIBRATION, s_vibration_on);
+  switch (s_settings_sel) {
+    case 0:
+      s_bl_mode = (s_bl_mode + 1) % NUM_BL_MODES;   // Off -> Timeout -> Always
+      apply_backlight();
+      persist_write_int(PK_BL_MODE, s_bl_mode);
+      break;
+    case 1:
+      s_vibration_on = !s_vibration_on;
+      persist_write_bool(PK_VIBRATION, s_vibration_on);
+      if (s_vibration_on) vibe_short();   // sample buzz when turning it on
+      break;
+    case 2:
+      s_sound_vol = (s_sound_vol + 1) % 4;   // Off -> Soft -> Normal -> Loud
+      persist_write_int(PK_SOUND_VOL, s_sound_vol);
+      if (s_sound_vol) sfx_pearl();   // sample blip at the new level
+      break;
+    case 3:
+      if (s_reset_armed) { reset_save(); s_reset_armed = false; }
+      else s_reset_armed = true;   // first press arms; a second confirms
+      break;
   }
   layer_mark_dirty(s_layer);
 }
@@ -976,9 +1154,11 @@ static void select_raw_down(ClickRecognizerRef rec, void *ctx) {
     case ST_VICTORY:
       if (s_go_lock) break;
       start_run();
+      s_thrust = true;   // SELECT is still held: keep swimming, don't sink
       break;
     case ST_TITLE:
       start_run();
+      s_thrust = true;
       break;
     case ST_SHOP:
       try_buy();
@@ -1004,12 +1184,14 @@ static void up_click(ClickRecognizerRef rec, void *ctx) {
       break;
     case ST_TITLE:
       s_settings_sel = 0;
+      s_reset_armed = false;
       s_state = ST_SETTINGS;
       layer_mark_dirty(s_layer);
       break;
     case ST_SETTINGS:
       if (s_settings_sel > 0) {
         s_settings_sel--;
+        s_reset_armed = false;
         layer_mark_dirty(s_layer);
       }
       break;
@@ -1040,8 +1222,9 @@ static void down_raw_down(ClickRecognizerRef rec, void *ctx) {
       }
       break;
     case ST_SETTINGS:
-      if (s_settings_sel < 1) {
+      if (s_settings_sel < NUM_SETTINGS - 1) {
         s_settings_sel++;
+        s_reset_armed = false;
         layer_mark_dirty(s_layer);
       }
       break;
@@ -1067,10 +1250,14 @@ static void back_click(ClickRecognizerRef rec, void *ctx) {
     case ST_PAUSED:
       end_run(false);  // bail out, keep collected pearls
       break;
+    case ST_SETTINGS:
+      s_reset_armed = false;
+      s_state = ST_TITLE;
+      layer_mark_dirty(s_layer);
+      break;
     case ST_GAMEOVER:
     case ST_VICTORY:
     case ST_SHOP:
-    case ST_SETTINGS:
       s_state = ST_TITLE;
       layer_mark_dirty(s_layer);
       break;
@@ -1116,9 +1303,13 @@ static void init(void) {
   srand(time(NULL));
   pick_language();
   load_progress();
-  if (s_backlight_on) backlight_touch();
+  apply_backlight();
 
   s_f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  // Non-bold 18 exists for the armed-reset confirm: bold 18 would not fit
+  // NL "Nogmaals om te wissen" in the row, and f14 made the one state that
+  // must be read the smallest text on the screen.
+  s_f18 = fonts_get_system_font(FONT_KEY_GOTHIC_18);
   s_f18b = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
   s_f24b = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
   s_f28b = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
