@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0
+
+- **Sharks.** A new hazard that actively swims toward your depth instead of
+  drifting past — starts appearing from 30 m down, one at a time. Get too
+  close without defending yourself and it costs you like any other collision.
+- **Sword**, a fourth shop upgrade (5 levels, same cost curve as the rest):
+  with a sword equipped, a tap of **UP** or a tap on the screen while a shark
+  is in range fends it off and pays out pearls; without one, dodging is your
+  only option.
+- Touch (Pebble Time 2): tap the screen to fend off a shark in range, in
+  addition to UP.
+
 ## 1.0.0
 
 - Initial release: a one-button dive game for Pebble Time 2. Hold **SELECT**

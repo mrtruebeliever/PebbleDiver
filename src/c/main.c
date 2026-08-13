@@ -34,6 +34,7 @@
 #define PK_SOUND 9          // legacy on/off bool; superseded by PK_SOUND_VOL
 #define PK_BL_MODE 10
 #define PK_SOUND_VOL 11
+#define PK_SWORD 12
 
 #define BL_TIMEOUT_MS 30000
 
@@ -41,8 +42,20 @@
 #define PEBBLE_MIN_M 200
 #define PEBBLE_RETRY_M 40
 
+// Shark: an active hazard that homes in on the diver's depth instead of
+// drifting past like a rock or jelly. Starting values, to be calibrated on
+// real hardware.
+#define SHARK_MIN_DEPTH_M    30   // sharks start appearing once the water gets this deep
+#define SHARK_SPAWN_PCT      8    // % chance a spawn roll picks a shark, when eligible
+// px/tick it closes in on the diver's y while approaching. Must stay below the
+// diver's own slowest sustained climb (~1.2 px/tick, unupgraded, vmax_up=310fp
+// -> 310/256) or the chase is literally unwinnable -- the diver can never
+// out-climb a homing target that corrects faster than it can move.
+#define SHARK_HOME_SPEED     1
+#define SHARK_STRIKE_RANGE   55   // px either side of the diver: the parry-or-dodge window
+
 typedef enum { ST_TITLE, ST_PLAYING, ST_PAUSED, ST_GAMEOVER, ST_VICTORY, ST_SHOP, ST_SETTINGS } GameState;
-typedef enum { ENT_NONE, ENT_ROCK, ENT_JELLY, ENT_PEARL, ENT_BUBBLE, ENT_PEBBLE } EntType;
+typedef enum { ENT_NONE, ENT_ROCK, ENT_JELLY, ENT_PEARL, ENT_BUBBLE, ENT_PEBBLE, ENT_SHARK } EntType;
 // Backlight: off (system default), timeout (lit while interacting, then dims),
 // or always (forced 100% on). Mirrors Switchback's 3-state model.
 typedef enum { BL_OFF, BL_TIMED, BL_ALWAYS, NUM_BL_MODES } BacklightMode;
@@ -85,7 +98,7 @@ static Particle s_parts[MAX_PART];
 // bank / progress
 static int32_t s_pearls, s_run_pearls;
 static int32_t s_best_m;
-static int8_t s_tank, s_fins, s_lamp;
+static int8_t s_tank, s_fins, s_lamp, s_sword;
 static bool s_new_record;
 static bool s_found;               // magic Pebble found at least once
 static bool s_pebble_active;       // magic Pebble currently in the water
@@ -116,8 +129,8 @@ typedef enum { L_EN, L_NL, L_FR, L_DE, L_ES, NUM_LANGS } Lang;
 enum {
   S_TITLE, S_HINT_DIVE, S_HINT_SHOP, S_STATS,
   S_O2_OUT, S_DEPTH, S_RUN_PEARLS, S_NEW_RECORD, S_HINT_RETRY,
-  S_SHOP_TITLE, S_ITEM_TANK, S_ITEM_FINS, S_ITEM_LAMP,
-  S_DESC_TANK, S_DESC_FINS, S_DESC_LAMP, S_SHOP_HINT,
+  S_SHOP_TITLE, S_ITEM_TANK, S_ITEM_FINS, S_ITEM_LAMP, S_ITEM_SWORD,
+  S_DESC_TANK, S_DESC_FINS, S_DESC_LAMP, S_DESC_SWORD, S_SHOP_HINT,
   S_PAUSED, S_HINT_RESUME,
   S_WIN_TITLE, S_LEGEND,
   S_HINT_SETTINGS, S_SETTINGS_TITLE, S_OPT_BACKLIGHT, S_OPT_VIBRATION,
@@ -134,8 +147,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Best: %ld m  ·  Pearls: %ld",
     "Out of air!", "Depth: %ld m", "Pearls: +%ld", "New record!",
     "SELECT · again",
-    "Shop", "Oxygen tank", "Fins", "Lamp",
-    "+8s oxygen", "swim faster", "attracts pearls",
+    "Shop", "Oxygen tank", "Fins", "Lamp", "Sword",
+    "+8s oxygen", "swim faster", "attracts pearls", "fight back the shark",
     "SELECT · buy    BACK · close",
     "Paused", "SELECT · resume",
     "You found the magic Pebble!",
@@ -151,8 +164,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Record: %ld m  ·  Parels: %ld",
     "Zuurstof op!", "Diepte: %ld m", "Parels: +%ld", "Nieuw record!",
     "SELECT · opnieuw",
-    "Winkel", "Zuurstoftank", "Vinnen", "Lamp",
-    "+8s zuurstof", "sneller zwemmen", "trekt parels aan",
+    "Winkel", "Zuurstoftank", "Vinnen", "Lamp", "Zwaard",
+    "+8s zuurstof", "sneller zwemmen", "trekt parels aan", "sla de haai terug",
     "SELECT · kopen    TERUG · sluiten",
     "Gepauzeerd", "SELECT · verder",
     "Je vond de magische Pebble!",
@@ -168,8 +181,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Record : %ld m  ·  Perles : %ld",
     "Plus d'air !", "Prof. : %ld m", "Perles : +%ld", "Nouveau record !",
     "SELECT · rejouer",
-    "Boutique", "Bouteille d'O2", "Palmes", "Lampe",
-    "+8 s d'oxygène", "nage plus vite", "attire les perles",
+    "Boutique", "Bouteille d'O2", "Palmes", "Lampe", "Épée",
+    "+8 s d'oxygène", "nage plus vite", "attire les perles", "repousse le requin",
     "SELECT · acheter   RETOUR · fermer",
     "Pause", "SELECT · reprendre",
     "Pebble magique trouvé !",
@@ -185,8 +198,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Rekord: %ld m  ·  Perlen: %ld",
     "Keine Luft!", "Tiefe: %ld m", "Perlen: +%ld", "Neuer Rekord!",
     "SELECT · nochmal",
-    "Laden", "Sauerstofftank", "Flossen", "Lampe",
-    "+8s Sauerstoff", "schneller schwimmen", "zieht Perlen an",
+    "Laden", "Sauerstofftank", "Flossen", "Lampe", "Schwert",
+    "+8s Sauerstoff", "schneller schwimmen", "zieht Perlen an", "wehr den Hai ab",
     "SELECT · kaufen  ZURÜCK · schließen",
     "Pausiert", "SELECT · weiter",
     "Magischer Pebble gefunden!",
@@ -202,8 +215,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Récord: %ld m  ·  Perlas: %ld",
     "¡Sin aire!", "Prof.: %ld m", "Perlas: +%ld", "¡Nuevo récord!",
     "SELECT · otra vez",
-    "Tienda", "Tanque de O2", "Aletas", "Lámpara",
-    "+8 s de oxígeno", "nada más rápido", "atrae las perlas",
+    "Tienda", "Tanque de O2", "Aletas", "Lámpara", "Espada",
+    "+8 s de oxígeno", "nada más rápido", "atrae las perlas", "rechaza al tiburón",
     "SELECT · comprar   ATRÁS · cerrar",
     "Pausa", "SELECT · seguir",
     "¡Pebble mágico encontrado!",
@@ -249,6 +262,7 @@ static void save_progress(void) {
   persist_write_int(PK_TANK, s_tank);
   persist_write_int(PK_FINS, s_fins);
   persist_write_int(PK_LAMP, s_lamp);
+  persist_write_int(PK_SWORD, s_sword);
   persist_write_bool(PK_FOUND, s_found);
 }
 
@@ -258,6 +272,7 @@ static void load_progress(void) {
   s_tank = persist_read_int(PK_TANK);
   s_fins = persist_read_int(PK_FINS);
   s_lamp = persist_read_int(PK_LAMP);
+  s_sword = persist_read_int(PK_SWORD);
   s_found = persist_read_bool(PK_FOUND);
   // Migrate the old on/off backlight bool to the 3-state mode on first run.
   if (persist_exists(PK_BL_MODE)) {
@@ -352,7 +367,24 @@ static void apply_backlight(void) {
 }
 
 static bool all_upgrades_max(void) {
-  return s_tank >= MAX_LEVEL && s_fins >= MAX_LEVEL && s_lamp >= MAX_LEVEL;
+  return s_tank >= MAX_LEVEL && s_fins >= MAX_LEVEL && s_lamp >= MAX_LEVEL
+      && s_sword >= MAX_LEVEL;
+}
+
+// A shark is dangerous (collides) and parryable only within this corridor
+// around the diver; outside it, it's either still closing in or already spent.
+static bool shark_in_range(const Entity *e) {
+  int16_t ex = e->x_fp >> FP;
+  int16_t d = ex - DIVER_X;
+  if (d < 0) d = -d;
+  return d <= SHARK_STRIKE_RANGE;
+}
+
+static bool shark_active(void) {
+  for (int i = 0; i < MAX_ENT; i++) {
+    if (s_ents[i].type == ENT_SHARK) return true;
+  }
+  return false;
 }
 
 static void stop_timer(void) {
@@ -452,7 +484,11 @@ static void spawn_entity(int16_t screen_w, int16_t screen_h) {
     e->type = ENT_BUBBLE;
   } else {
     int roll = rand() % 100;
-    if (roll < 35) e->type = ENT_ROCK;
+    // Sharks start appearing once the water is deep enough, one at a time —
+    // a distinct encounter rather than just another entity in the rotation.
+    if (depth_m() >= SHARK_MIN_DEPTH_M && !shark_active() && roll < SHARK_SPAWN_PCT) {
+      e->type = ENT_SHARK;
+    } else if (roll < 35) e->type = ENT_ROCK;
     else if (roll < 60) e->type = ENT_JELLY;
     else if (roll < 85) e->type = ENT_PEARL;
     else e->type = ENT_BUBBLE;
@@ -469,6 +505,7 @@ static void spawn_entity(int16_t screen_w, int16_t screen_h) {
     case ENT_ROCK:  e->r = 9 + rand() % 5; break;
     case ENT_JELLY: e->r = 7; break;
     case ENT_PEARL: e->r = 4; break;
+    case ENT_SHARK: e->r = 8; break;
     default:        e->r = 5; break;
   }
 }
@@ -500,6 +537,26 @@ static void spawn_particle(int16_t x, int16_t y) {
       s_parts[i].life = 24 + rand() % 10;
       return;
     }
+  }
+}
+
+// Fends off a shark that's within striking range — a tap (UP or the screen)
+// timed while it's close. Without a sword this is a no-op: the only defense
+// is swimming out of the way, same as any other hazard.
+static void try_parry(void) {
+  if (s_state != ST_PLAYING || s_sword <= 0) return;
+  for (int i = 0; i < MAX_ENT; i++) {
+    Entity *e = &s_ents[i];
+    if (e->type != ENT_SHARK || !shark_in_range(e)) continue;
+    int16_t ex = e->x_fp >> FP;
+    s_run_pearls += 2 + s_sword;   // higher sword levels pay off the parry more
+    spawn_particle(ex, e->y);
+    spawn_particle(ex - 6, e->y - 4);
+    e->type = ENT_NONE;
+    backlight_touch();
+    vibe_short();
+    sfx_buy();
+    return;   // only one shark is ever active at a time
   }
 }
 
@@ -580,6 +637,19 @@ static void game_tick(void *data) {
     } else if (e->type == ENT_PEBBLE) {
       e->phase = (e->phase + 700) % TRIG_MAX_ANGLE;
       e->y = e->base_y + (sin_lookup(e->phase) * 5 / TRIG_MAX_RATIO);
+    } else if (e->type == ENT_SHARK) {
+      // Actively closes in on the diver's depth while it's still approaching
+      // — the "aanloop" that gives a fair beat to react. Once it has entered
+      // the strike range it commits to that trajectory (stops homing), so
+      // the last stretch is a plain positional dodge, same as a rock or
+      // jelly, instead of an inescapable magnet the whole way in.
+      e->phase = (e->phase + 1400) % TRIG_MAX_ANGLE;   // tail wag, draw-only
+      if (!shark_in_range(e)) {
+        if (dy > e->y + SHARK_HOME_SPEED) e->y += SHARK_HOME_SPEED;
+        else if (dy < e->y - SHARK_HOME_SPEED) e->y -= SHARK_HOME_SPEED;
+        else e->y = dy;
+        e->base_y = e->y;
+      }
     }
 
     // Lamp magnet pulls collectibles toward the diver
@@ -738,6 +808,56 @@ static void draw_entity(GContext *ctx, Entity *e, GColor water) {
     case ENT_PEBBLE:
       draw_magic_pebble(ctx, GPoint(x, e->y), 6);
       break;
+    case ENT_SHARK: {
+      // Grey while closing in; flips to red (plus a ring) once it's in the
+      // strike-or-parry corridor — the readable cue for "act now". Body is a
+      // wide, short oval (not a full circle) with pointed nose/tail and a
+      // triangular dorsal fin, so it reads as a small shark rather than a
+      // coloured ball. Travels right-to-left, so the nose points left.
+      bool danger = shark_in_range(e);
+      GColor body = danger ? GColorRed : GColorDarkGray;
+      int16_t r = e->r;
+      int16_t wag = sin_lookup(e->phase) * 3 / TRIG_MAX_RATIO;
+      GPoint center = GPoint(x, e->y);
+
+      graphics_context_set_fill_color(ctx, body);
+      graphics_fill_rect(ctx, GRect(x - r - 2, e->y - r / 2 - 1, 2 * r + 4, r + 2), 4, GCornersAll);
+
+      GPathInfo nose_info = {
+        .num_points = 3,
+        .points = (GPoint[]){ {x - r - 7, e->y}, {x - r + 1, e->y - 4}, {x - r + 1, e->y + 4} }
+      };
+      GPath *nose = gpath_create(&nose_info);
+      gpath_draw_filled(ctx, nose);
+      gpath_destroy(nose);
+
+      GPathInfo tail_info = {
+        .num_points = 3,
+        .points = (GPoint[]){ {x + r - 1, e->y - 4}, {x + r - 1, e->y + 4}, {x + r + 7, e->y + wag} }
+      };
+      GPath *tail = gpath_create(&tail_info);
+      gpath_draw_filled(ctx, tail);
+      gpath_destroy(tail);
+
+      GPathInfo fin_info = {
+        .num_points = 3,
+        .points = (GPoint[]){ {x - 3, e->y - r / 2 - 1}, {x + 3, e->y - r / 2 - 1}, {x, e->y - r - 6} }
+      };
+      GPath *fin = gpath_create(&fin_info);
+      gpath_draw_filled(ctx, fin);
+      gpath_destroy(fin);
+
+      graphics_context_set_fill_color(ctx, GColorWhite);
+      graphics_fill_circle(ctx, GPoint(x - r / 2, e->y - 1), 2);
+      graphics_context_set_fill_color(ctx, GColorBlack);
+      graphics_fill_circle(ctx, GPoint(x - r / 2, e->y - 1), 1);
+
+      if (danger) {
+        graphics_context_set_stroke_color(ctx, GColorWhite);
+        graphics_draw_circle(ctx, center, r + 5);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -903,13 +1023,13 @@ static void draw_shop(GContext *ctx, GRect b) {
   graphics_draw_text(ctx, buf, s_f18b, GRect(b.size.w - 48, 7, 44, 22),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  const char *names[3] = {S(S_ITEM_TANK), S(S_ITEM_FINS), S(S_ITEM_LAMP)};
-  const char *descs[3] = {S(S_DESC_TANK), S(S_DESC_FINS), S(S_DESC_LAMP)};
-  int8_t levels[3] = {s_tank, s_fins, s_lamp};
+  const char *names[4] = {S(S_ITEM_TANK), S(S_ITEM_FINS), S(S_ITEM_LAMP), S(S_ITEM_SWORD)};
+  const char *descs[4] = {S(S_DESC_TANK), S(S_DESC_FINS), S(S_DESC_LAMP), S(S_DESC_SWORD)};
+  int8_t levels[4] = {s_tank, s_fins, s_lamp, s_sword};
 
-  for (int i = 0; i < 3; i++) {
-    int16_t y = 38 + i * 56;
-    GRect card = GRect(6, y, b.size.w - 12, 52);
+  for (int i = 0; i < 4; i++) {
+    int16_t y = 32 + i * 42;
+    GRect card = GRect(6, y, b.size.w - 12, 38);
     graphics_context_set_fill_color(ctx, i == s_shop_sel ? GColorCobaltBlue : GColorDukeBlue);
     graphics_fill_rect(ctx, card, 4, GCornersAll);
     if (i == s_shop_sel) {
@@ -918,15 +1038,15 @@ static void draw_shop(GContext *ctx, GRect b) {
     }
 
     graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, names[i], s_f18b, GRect(card.origin.x + 6, y + 2, 136, 22),
+    graphics_draw_text(ctx, names[i], s_f18b, GRect(card.origin.x + 6, y + 1, 136, 18),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, GColorCeleste);
-    graphics_draw_text(ctx, descs[i], s_f14, GRect(card.origin.x + 6, y + 19, 130, 18),
+    graphics_draw_text(ctx, descs[i], s_f14, GRect(card.origin.x + 6, y + 17, 130, 14),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     // Level pips
     for (int p = 0; p < MAX_LEVEL; p++) {
-      GRect pip = GRect(card.origin.x + 6 + p * 10, y + 40, 7, 7);
+      GRect pip = GRect(card.origin.x + 6 + p * 10, y + 30, 6, 6);
       if (p < levels[i]) {
         graphics_context_set_fill_color(ctx, GColorGreen);
         graphics_fill_rect(ctx, pip, 1, GCornersAll);
@@ -942,17 +1062,17 @@ static void draw_shop(GContext *ctx, GRect b) {
       snprintf(buf, sizeof(buf), "MAX");
     } else {
       graphics_context_set_fill_color(ctx, GColorWhite);
-      graphics_fill_circle(ctx, GPoint(card.origin.x + card.size.w - 46, y + 25), 3);
+      graphics_fill_circle(ctx, GPoint(card.origin.x + card.size.w - 46, y + 17), 3);
       snprintf(buf, sizeof(buf), "%ld", (long)SHOP_COST[(int)levels[i]]);
     }
     graphics_draw_text(ctx, buf, s_f18b,
-                       GRect(card.origin.x + card.size.w - 40, y + 14, 36, 22),
+                       GRect(card.origin.x + card.size.w - 40, y + 8, 36, 18),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 
   // Once everything is bought, the shop whispers about the legend instead
   draw_center_text(ctx, all_upgrades_max() ? S(S_LEGEND) : S(S_SHOP_HINT), s_f14,
-                   b.size.h - 34, 32, b,
+                   b.size.h - 30, 28, b,
                    all_upgrades_max() ? GColorCeleste : GColorLightGray);
 }
 
@@ -1080,7 +1200,7 @@ static void shop_flash_end(void *data) {
 }
 
 static void try_buy(void) {
-  int8_t *lvl[3] = {&s_tank, &s_fins, &s_lamp};
+  int8_t *lvl[4] = {&s_tank, &s_fins, &s_lamp, &s_sword};
   int8_t cur = *lvl[(int)s_shop_sel];
   if (cur >= MAX_LEVEL) return;
   int32_t cost = SHOP_COST[(int)cur];
@@ -1105,7 +1225,7 @@ static void try_buy(void) {
 static void reset_save(void) {
   s_pearls = 0;
   s_best_m = 0;
-  s_tank = 0; s_fins = 0; s_lamp = 0;
+  s_tank = 0; s_fins = 0; s_lamp = 0; s_sword = 0;
   s_found = false;
   s_new_record = false;
   save_progress();
@@ -1176,6 +1296,9 @@ static void select_raw_up(ClickRecognizerRef rec, void *ctx) {
 static void up_click(ClickRecognizerRef rec, void *ctx) {
   backlight_touch();
   switch (s_state) {
+    case ST_PLAYING:
+      try_parry();
+      break;
     case ST_SHOP:
       if (s_shop_sel > 0) {
         s_shop_sel--;
@@ -1216,7 +1339,7 @@ static void down_raw_down(ClickRecognizerRef rec, void *ctx) {
       layer_mark_dirty(s_layer);
       break;
     case ST_SHOP:
-      if (s_shop_sel < 2) {
+      if (s_shop_sel < 3) {
         s_shop_sel++;
         layer_mark_dirty(s_layer);
       }
@@ -1264,6 +1387,15 @@ static void back_click(ClickRecognizerRef rec, void *ctx) {
     case ST_TITLE:
       window_stack_pop(true);
       break;
+  }
+}
+
+// Touch (Pebble Time 2): tapping the screen fends off a shark in range, same
+// as UP — SELECT/DOWN are already busy swimming, so touch is a second way to
+// reach the same action rather than a full gesture set.
+static void touch_handler(const TouchEvent *event, void *ctx) {
+  if (event->type == TouchEvent_Touchdown) {
+    try_parry();
   }
 }
 
@@ -1321,6 +1453,7 @@ static void init(void) {
     .unload = window_unload,
   });
   app_focus_service_subscribe(focus_handler);
+  touch_service_subscribe(touch_handler, NULL);
   window_stack_push(s_window, true);
 }
 
@@ -1328,6 +1461,7 @@ static void deinit(void) {
   backlight_stop_timer();
   light_enable(false);
   stop_timer();
+  touch_service_unsubscribe();
   app_focus_service_unsubscribe();
   save_progress();
   window_destroy(s_window);

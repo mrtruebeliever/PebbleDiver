@@ -13,10 +13,13 @@ scheme. Dodge rocks and jellyfish on the way down, scoop up pearls and air
 bubbles, and see how deep you can go before your oxygen runs out.
 
 Pearls carry over between runs. Spend them in the shop on a bigger oxygen
-tank, faster fins, or a lamp that pulls nearby pearls and bubbles toward you.
-The deeper you go, the darker the water and the faster the current — legend
-says a magic Pebble waits deep below for divers who have fully equipped
-themselves. Whether that legend is true is for you to find out.
+tank, faster fins, a lamp that pulls nearby pearls and bubbles toward you, or
+a sword. The deeper you go, the darker the water and the faster the
+current — and from 30 m down, sharks start hunting you instead of just
+drifting past. Dodge them, or equip a sword and tap UP (or the touchscreen)
+to fend one off for extra pearls. Legend says a magic Pebble waits deep below
+for divers who have fully equipped themselves. Whether that legend is true is
+for you to find out.
 
 FEATURES
 • Genuine one-button gameplay: hold to rise, release to sink, DOWN for a
@@ -24,7 +27,9 @@ FEATURES
 • Oxygen meter with a fair "pity" system — bubbles never stay scarce for
   long, so a dry spell never turns into an unfair death.
 • Pearls persist between runs — build up your stash and gear up over time.
-• Shop with three upgrades, five levels each: Oxygen tank, Fins, Lamp.
+• Shop with four upgrades, five levels each: Oxygen tank, Fins, Lamp, Sword.
+• Sharks actively hunt you from 30 m down — dodge them, or fend one off with
+  a sword (UP or a screen tap) for a pearl payout.
 • Water darkens and the current quickens the deeper you dive, for a real
   sense of descent.
 • Made for the Pebble Time 2 (Emery) color screen.
