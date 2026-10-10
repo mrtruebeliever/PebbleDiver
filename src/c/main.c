@@ -90,6 +90,8 @@ static int32_t s_spawn_px;         // px until next spawn
 static int32_t s_px_since_bubble;  // px scrolled since last bubble spawn
 static int16_t s_invuln;           // ticks of invulnerability left
 static bool s_o2_warned;
+static int32_t s_o2_beep_ms;       // countdown to the next low-oxygen beep
+#define O2_BEEP_EVERY_MS 2000
 static uint32_t s_tick;
 
 static Entity s_ents[MAX_ENT];
@@ -137,7 +139,7 @@ enum {
   S_ON, S_OFF, S_SETTINGS_HINT,
   S_OPT_SOUND, S_OPT_RESET, S_RESET_CONFIRM, S_BL_TIMED, S_BL_ALWAYS,
   S_HINT_CONTROLS,
-  S_SND_SOFT, S_SND_NORMAL, S_SND_LOUD,
+  S_SND_SOFT, S_SND_NORMAL, S_SND_LOUD, S_SND_MUTED,
   NUM_STRS
 };
 
@@ -157,7 +159,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "On", "Off", "UP/DOWN · move   SELECT · toggle   BACK · close",
     "Sound", "Reset save", "Press again to erase", "Timeout", "Always",
     "SELECT up · DOWN dive",
-    "Soft", "Normal", "Loud",
+    "Soft", "Normal", "Loud", "Muted",
   },
   [L_NL] = {
     "PebbleDiver", "SELECT · duiken", "OMLAAG · winkel",
@@ -174,7 +176,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Aan", "Uit", "OMHOOG/OMLAAG · kiezen   SELECT · wisselen   TERUG · sluiten",
     "Geluid", "Wissen", "Nogmaals om te wissen", "Time-out", "Altijd",
     "SELECT omhoog · OMLAAG duik",
-    "Zacht", "Normaal", "Luid",
+    "Zacht", "Normaal", "Luid", "Gedempt",
   },
   [L_FR] = {
     "PebbleDiver", "SELECT · plonger", "BAS · boutique",
@@ -191,7 +193,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Activé", "Désactivé", "HAUT/BAS · choisir   SELECT · basculer   RETOUR · fermer",
     "Son", "Effacer", "Encore pour effacer", "Minuteur", "Toujours",
     "SELECT monter · BAS plonger",
-    "Doux", "Normal", "Fort",
+    "Doux", "Normal", "Fort", "Muet",
   },
   [L_DE] = {
     "PebbleDiver", "SELECT · tauchen", "RUNTER · Laden",
@@ -208,7 +210,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "An", "Aus", "HOCH/RUNTER · wählen  SELECT · umschalten  ZURÜCK · schließen",
     "Ton", "Löschen", "Nochmal zum Löschen", "Zeitlimit", "Immer",
     "SELECT hoch · RUNTER tauchen",
-    "Leise", "Normal", "Laut",
+    "Leise", "Normal", "Laut", "Stumm",
   },
   [L_ES] = {
     "PebbleDiver", "SELECT · bucear", "ABAJO · tienda",
@@ -225,7 +227,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Activado", "Desactivado", "ARRIBA/ABAJO · elegir   SELECT · cambiar   ATRÁS · cerrar",
     "Sonido", "Borrar", "Otra vez para borrar", "Con tiempo", "Siempre",
     "SELECT sube · ABAJO bucea",
-    "Bajo", "Normal", "Alto",
+    "Bajo", "Normal", "Alto", "Silencio",
   },
 };
 
@@ -295,20 +297,73 @@ static void vibe_long(void)   { if (s_vibration_on) vibes_long_pulse(); }
 static void vibe_double(void) { if (s_vibration_on) vibes_double_pulse(); }
 
 // ---------------------------------------------------------------------------
-// Sound effects (PT2 speaker). Short chiptune blips, all gated by the Sound
-// setting. MIDI notes: 60 = C4; velocity 0 = use the call's global volume.
+// Sound effects (PT2 speaker), all gated by the Sound setting. The game is under
+// water, so the sounds are too: soft sine and triangle voices, a real bubble and
+// a dull knock instead of chiptune square waves. The bubble and the knock are
+// samples synthesised by tools/gen_sfx.py (resources/sfx/); the rest are notes.
+// Several effects stack voices with speaker_play_tracks() -- a pearl's "ting"
+// is a note plus a quieter fifth above it, which a single waveform can't do.
+// MIDI notes: 60 = C4. Velocity 0 = the call's volume; a nonzero velocity per
+// note is how the effects shape their own fade.
 // ---------------------------------------------------------------------------
 #define SFX_VOL 80
 #define SFX_N(a) (sizeof(a) / sizeof((a)[0]))
-#define SQ SpeakerWaveformSquare
+#define SI  SpeakerWaveformSine
+#define SQ  SpeakerWaveformSquare
 #define TR_ SpeakerWaveformTriangle
+#define SAW SpeakerWaveformSawtooth
+#define REST(ms) {0, SI, ms, 0, 0}
 
-static const SpeakerNote SFX_PEARL[]  = {{83, SQ, 45, 0, 0}, {90, SQ, 90, 0, 0}};                        // B5 -> F#6
-static const SpeakerNote SFX_BUBBLE[] = {{79, TR_, 45, 0, 0}, {86, TR_, 95, 0, 0}};                      // airy rise
-static const SpeakerNote SFX_WIN[]    = {{72, SQ, 55, 0, 0}, {76, SQ, 55, 0, 0}, {79, SQ, 55, 0, 0}, {84, SQ, 160, 0, 0}}; // fanfare
-static const SpeakerNote SFX_DROWN[]  = {{72, SQ, 120, 0, 0}, {68, SQ, 120, 0, 0}, {64, SQ, 120, 0, 0}, {59, SQ, 260, 0, 0}}; // descending
-static const SpeakerNote SFX_BUY[]    = {{79, TR_, 60, 0, 0}, {84, TR_, 130, 0, 0}};                     // confirm
-static const SpeakerNote SFX_DENY[]   = {{55, SQ, 90, 0, 0}, {51, SQ, 150, 0, 0}};                       // low error
+// Samples: loaded from resources once (sfx_load), played pitch-shifted. The
+// waveform field of a sample track's notes is ignored. Base note = the pitch
+// the sample was rendered at, so a note of SAMPLE_BASE plays it unshifted.
+#define SAMPLE_BASE 72
+static SpeakerSample s_smp_bubble = { NULL, 0, SpeakerPcmFormat_16kHz_8bit, SAMPLE_BASE, false };
+static SpeakerSample s_smp_thud   = { NULL, 0, SpeakerPcmFormat_16kHz_8bit, SAMPLE_BASE, false };
+
+// Pearl: a glassy "ting" -- B6 fading out, with a quiet F#7 shimmer on top.
+static const SpeakerNote PEARL_A[] = {{95, SI, 30, 120, 0}, {95, SI, 40, 70, 0}, {95, SI, 70, 30, 0}};
+static const SpeakerNote PEARL_B[] = {{102, SI, 25, 55, 0}, {102, SI, 45, 25, 0}};
+// Air bubble: two blubs, the second higher, like a bubble wobbling up.
+static const SpeakerNote BUBBLE_N[] = {{72, SI, 90, 110, 0}, {79, SI, 100, 95, 0}};
+// Collision: a dull knock on rock or a jellyfish, not an electric buzz.
+static const SpeakerNote THUD_N[] = {{72, SI, 160, 127, 0}};
+// Low oxygen: a soft double beep, repeated while the tank stays nearly empty.
+static const SpeakerNote LOW_O2[] = {{81, TR_, 60, 110, 0}, REST(70), {81, TR_, 60, 110, 0}};
+// Drowned: a slow falling line while the last air bubbles up past it.
+static const SpeakerNote DROWN_A[] = {{76, TR_, 200, 110, 0}, {72, TR_, 200, 100, 0},
+                                      {69, TR_, 200, 90, 0}, {64, TR_, 260, 80, 0},
+                                      {64, TR_, 200, 35, 0}};
+static const SpeakerNote DROWN_B[] = {REST(80), {84, SI, 90, 80, 0}, REST(160), {88, SI, 90, 70, 0},
+                                      REST(200), {91, SI, 90, 55, 0}, REST(180), {96, SI, 90, 40, 0}};
+// New depth record (instead of the drowning line): a bright climb.
+static const SpeakerNote RECORD_A[] = {{72, TR_, 80, 100, 0}, {76, TR_, 80, 100, 0},
+                                       {79, TR_, 80, 100, 0}, {84, TR_, 260, 110, 0}, {84, TR_, 200, 40, 0}};
+static const SpeakerNote RECORD_B[] = {REST(240), {88, SI, 80, 50, 0}, {91, SI, 260, 45, 0}};
+// A shark closes in: two dark notes a semitone apart, closing in faster.
+static const SpeakerNote SHARK[] = {{64, SAW, 240, 100, 0}, {65, SAW, 240, 100, 0}, REST(160),
+                                    {64, SAW, 150, 110, 0}, {65, SAW, 150, 110, 0},
+                                    {64, SAW, 110, 120, 0}, {65, SAW, 110, 120, 0}};
+// Sword parry: two square notes a semitone apart beat against each other,
+// which is what makes metal ring.
+static const SpeakerNote CLANG_A[] = {{88, SQ, 40, 110, 0}, {88, SQ, 60, 55, 0}, {88, SQ, 80, 20, 0}};
+static const SpeakerNote CLANG_B[] = {{89, SQ, 40, 90, 0}, {89, SQ, 60, 45, 0}, {89, SQ, 80, 15, 0}};
+// The magic Pebble appears: a quick high twinkle.
+static const SpeakerNote TWINKLE[] = {{96, SI, 35, 70, 0}, {100, SI, 35, 70, 0}, {103, SI, 35, 70, 0},
+                                      {108, SI, 90, 50, 0}};
+// The magic Pebble found: a shimmering arpeggio in three voices.
+static const SpeakerNote WIN_A[] = {{84, SI, 90, 110, 0}, {88, SI, 90, 110, 0}, {91, SI, 90, 110, 0},
+                                    {96, SI, 360, 110, 0}, {96, SI, 300, 40, 0}};
+static const SpeakerNote WIN_B[] = {REST(45), {72, TR_, 90, 80, 0}, {76, TR_, 90, 80, 0},
+                                    {79, TR_, 90, 80, 0}, {84, TR_, 560, 70, 0}};
+static const SpeakerNote WIN_C[] = {REST(360), {103, SI, 30, 45, 0}, REST(60), {108, SI, 30, 40, 0},
+                                    REST(90), {105, SI, 30, 35, 0}, REST(120), {110, SI, 30, 30, 0}};
+// Shop: confirm and refuse.
+static const SpeakerNote SFX_BUY[]  = {{79, TR_, 60, 0, 0}, {84, TR_, 130, 0, 0}};
+static const SpeakerNote SFX_DENY[] = {{55, SQ, 90, 0, 0}, {51, SQ, 150, 0, 0}};
+
+#define TRACK(notes)          { notes, SFX_N(notes), NULL }
+#define SAMPLE_TRACK(n, smp)  { n, SFX_N(n), &(smp) }
 
 // Master volume per Sound setting (Off/Soft/Normal/Loud). Each SFX keeps its own
 // tuned base loudness; sv() scales it by the chosen level, so Loud == the
@@ -319,17 +374,65 @@ static uint8_t sv(uint8_t base) { return (uint16_t)base * SND_VOL[s_sound_vol & 
 // Quiet Time is the watch saying "not now" — a game blipping through it is
 // exactly what the user turned it on to stop. The setting stays where it was;
 // this only silences the speaker while the mode is active.
-static bool sfx_enabled(void) { return s_sound_vol && !quiet_time_is_active(); }
+// Quiet Time and the watch's own mute (Settings → Sounds & Haptics) both win
+// over the in-game Sound level.
+static bool sfx_enabled(void) { return s_sound_vol && !quiet_time_is_active() && !speaker_is_muted(); }
 
 static void sfx_play(const SpeakerNote *n, uint32_t c) { if (sfx_enabled()) speaker_play_notes(n, c, sv(SFX_VOL)); }
-static void sfx_pearl(void)  { sfx_play(SFX_PEARL,  SFX_N(SFX_PEARL)); }
-static void sfx_bubble(void) { sfx_play(SFX_BUBBLE, SFX_N(SFX_BUBBLE)); }
-static void sfx_win(void)    { sfx_play(SFX_WIN,    SFX_N(SFX_WIN)); }
-static void sfx_drown(void)  { sfx_play(SFX_DROWN,  SFX_N(SFX_DROWN)); }
-static void sfx_buy(void)    { sfx_play(SFX_BUY,    SFX_N(SFX_BUY)); }
-static void sfx_deny(void)   { sfx_play(SFX_DENY,   SFX_N(SFX_DENY)); }
-static void sfx_hit(void)    { if (sfx_enabled()) speaker_play_tone(150, 130, sv(92), SQ); }
-static void sfx_low_o2(void) { if (sfx_enabled()) speaker_play_tone(440, 120, sv(80), SQ); }
+static void sfx_tracks(const SpeakerTrack *t, uint32_t c) {
+  if (sfx_enabled()) speaker_play_tracks(t, c, sv(SFX_VOL));
+}
+
+// A sample whose resource failed to load plays as nothing rather than garbage.
+static void load_sample(SpeakerSample *smp, uint32_t resource_id) {
+  ResHandle h = resource_get_handle(resource_id);
+  size_t size = resource_size(h);
+  uint8_t *buf = malloc(size);
+  if (!buf) return;
+  smp->num_bytes = resource_load(h, buf, size);
+  smp->data = buf;
+}
+
+// Loaded once and never freed: a sound can still be playing from a buffer when
+// the app closes, and the system reclaims the app's heap after it stops it.
+static void sfx_load(void) {
+  load_sample(&s_smp_bubble, RESOURCE_ID_SFX_BUBBLE);
+  load_sample(&s_smp_thud, RESOURCE_ID_SFX_THUD);
+}
+
+static void sfx_sample(const SpeakerNote *n, uint32_t c, SpeakerSample *smp) {
+  if (!smp->data) return;
+  SpeakerTrack t = { n, c, smp };
+  sfx_tracks(&t, 1);
+}
+
+static void sfx_pearl(void) {
+  static const SpeakerTrack t[] = { TRACK(PEARL_A), TRACK(PEARL_B) };
+  sfx_tracks(t, SFX_N(t));
+}
+static void sfx_bubble(void) { sfx_sample(BUBBLE_N, SFX_N(BUBBLE_N), &s_smp_bubble); }
+static void sfx_hit(void)    { sfx_sample(THUD_N, SFX_N(THUD_N), &s_smp_thud); }
+static void sfx_low_o2(void) { sfx_play(LOW_O2, SFX_N(LOW_O2)); }
+static void sfx_drown(void) {
+  static const SpeakerTrack t[] = { TRACK(DROWN_A), TRACK(DROWN_B) };
+  sfx_tracks(t, SFX_N(t));
+}
+static void sfx_record(void) {
+  static const SpeakerTrack t[] = { TRACK(RECORD_A), TRACK(RECORD_B) };
+  sfx_tracks(t, SFX_N(t));
+}
+static void sfx_shark(void)   { sfx_play(SHARK, SFX_N(SHARK)); }
+static void sfx_clang(void) {
+  static const SpeakerTrack t[] = { TRACK(CLANG_A), TRACK(CLANG_B) };
+  sfx_tracks(t, SFX_N(t));
+}
+static void sfx_twinkle(void) { sfx_play(TWINKLE, SFX_N(TWINKLE)); }
+static void sfx_win(void) {
+  static const SpeakerTrack t[] = { TRACK(WIN_A), TRACK(WIN_B), TRACK(WIN_C) };
+  sfx_tracks(t, SFX_N(t));
+}
+static void sfx_buy(void)    { sfx_play(SFX_BUY,  SFX_N(SFX_BUY)); }
+static void sfx_deny(void)   { sfx_play(SFX_DENY, SFX_N(SFX_DENY)); }
 
 // Backlight. ALWAYS forces the light on until we release it; TIMED keeps it lit
 // while the player interacts and auto-dims after BL_TIMEOUT_MS of stillness;
@@ -364,6 +467,45 @@ static void apply_backlight(void) {
     case BL_TIMED:  backlight_touch(); break;
     default:        light_enable(false); break;
   }
+}
+
+// Colour backlight (Time 2; a no-op elsewhere). While diving the light follows
+// the water, pale cyan at the surface to deep blue by 250 m, and flashes red
+// for a moment on a hit. Off the dive it hands back to the user's own colour.
+#define TINT_SHALLOW 0xB4F0FFu
+#define TINT_DEEP    0x1E3CFFu
+#define TINT_HIT     0xFF2814u
+#define TINT_DEEP_M  250
+#define TINT_STEPS   25        // one step per 10 m
+#define HIT_FLASH_TICKS 9      // ~300 ms
+static int16_t s_hit_flash;    // ticks of red left
+static int s_tint = -1;        // last applied: -1 system, -2 hit, else depth step
+
+static uint32_t lerp_rgb(uint32_t a, uint32_t b, int step, int steps) {
+  uint32_t out = 0;
+  for (int shift = 0; shift <= 16; shift += 8) {
+    int32_t ca = (a >> shift) & 0xFF, cb = (b >> shift) & 0xFF;
+    out |= (uint32_t)(ca + (cb - ca) * step / steps) << shift;
+  }
+  return out;
+}
+
+// Called from every redraw: each state change and every game frame passes
+// through layer_update, and the cached step keeps the LED driver out of it
+// unless the colour actually changes.
+static void apply_tint(void) {
+  int want;
+  if (s_state != ST_PLAYING) want = -1;
+  else if (s_hit_flash > 0)  want = -2;
+  else {
+    int32_t m = depth_m();
+    want = (int)((m > TINT_DEEP_M ? TINT_DEEP_M : m) * TINT_STEPS / TINT_DEEP_M);
+  }
+  if (want == s_tint) return;
+  s_tint = want;
+  if (want == -1)      light_set_system_color();
+  else if (want == -2) light_set_color_rgb888(TINT_HIT);
+  else                 light_set_color_rgb888(lerp_rgb(TINT_SHALLOW, TINT_DEEP, want, TINT_STEPS));
 }
 
 static bool all_upgrades_max(void) {
@@ -411,6 +553,7 @@ static void start_run(void) {
   s_px_since_bubble = 0;
   s_run_pearls = 0;
   s_invuln = 45;
+  s_hit_flash = 0;
   s_o2_warned = false;
   s_thrust = false;
   s_dive = false;
@@ -448,7 +591,8 @@ static void end_run(bool drowned) {
   s_state = drowned ? ST_GAMEOVER : ST_TITLE;
   if (drowned) {
     vibe_long();
-    sfx_drown();
+    // A new depth record is the news worth hearing, even when the air ran out.
+    if (s_new_record) sfx_record(); else sfx_drown();
     s_go_lock = true;
     app_timer_register(1000, go_unlock, NULL);
   }
@@ -488,6 +632,7 @@ static void spawn_entity(int16_t screen_w, int16_t screen_h) {
     // a distinct encounter rather than just another entity in the rotation.
     if (depth_m() >= SHARK_MIN_DEPTH_M && !shark_active() && roll < SHARK_SPAWN_PCT) {
       e->type = ENT_SHARK;
+      sfx_shark();
     } else if (roll < 35) e->type = ENT_ROCK;
     else if (roll < 60) e->type = ENT_JELLY;
     else if (roll < 85) e->type = ENT_PEARL;
@@ -523,6 +668,7 @@ static void spawn_magic_pebble(int16_t screen_w, int16_t screen_h) {
       e->phase = rand() % TRIG_MAX_ANGLE;
       e->r = 7;
       s_pebble_active = true;
+      sfx_twinkle();
       return;
     }
   }
@@ -555,7 +701,7 @@ static void try_parry(void) {
     e->type = ENT_NONE;
     backlight_touch();
     vibe_short();
-    sfx_buy();
+    sfx_clang();
     return;   // only one shark is ever active at a time
   }
 }
@@ -572,10 +718,16 @@ static void game_tick(void *data) {
     end_run(true);
     return;
   }
+  // Low oxygen: one buzz when it starts, then a soft double beep every couple
+  // of seconds for as long as the tank stays nearly empty.
   if (!s_o2_warned && s_oxygen_ms < 10000) {
     s_o2_warned = true;
+    s_o2_beep_ms = 0;
     vibe_short();
-    sfx_low_o2();
+  }
+  if (s_o2_warned) {
+    if (s_o2_beep_ms <= 0) { sfx_low_o2(); s_o2_beep_ms = O2_BEEP_EVERY_MS; }
+    s_o2_beep_ms -= TICK_MS;
   }
   if (s_o2_warned && s_oxygen_ms >= 12000) s_o2_warned = false;
 
@@ -683,6 +835,7 @@ static void game_tick(void *data) {
       } else if (s_invuln == 0) {
         s_oxygen_ms -= O2_HIT_MS;
         s_invuln = 45;
+        s_hit_flash = HIT_FLASH_TICKS;
         vibe_short();
         sfx_hit();
         if (s_oxygen_ms <= 0) {
@@ -694,6 +847,7 @@ static void game_tick(void *data) {
     }
   }
   if (s_invuln > 0) s_invuln--;
+  if (s_hit_flash > 0) s_hit_flash--;
 
   // The magic Pebble appears once every upgrade is maxed out
   if (all_upgrades_max() && !s_pebble_active && depth_m() >= s_next_pebble_m) {
@@ -1147,9 +1301,10 @@ static void draw_settings(GContext *ctx, GRect b) {
       vt = s_vibration_on ? S(S_ON) : S(S_OFF);
       active = s_vibration_on;
     } else {   // Sound: 4-level volume
-      vt = s_sound_vol == 0 ? S(S_OFF) : s_sound_vol == 1 ? S(S_SND_SOFT)
+      vt = s_sound_vol == 0 ? S(S_OFF) : speaker_is_muted() ? S(S_SND_MUTED)
+         : s_sound_vol == 1 ? S(S_SND_SOFT)
          : s_sound_vol == 2 ? S(S_SND_NORMAL) : S(S_SND_LOUD);
-      active = s_sound_vol > 0;
+      active = s_sound_vol > 0 && !speaker_is_muted();
     }
     graphics_context_set_text_color(ctx, active ? GColorGreen : GColorLightGray);
     graphics_draw_text(ctx, vt, s_f14, GRect(row.origin.x + row.size.w - 68, y + 6, 62, 20),
@@ -1161,6 +1316,7 @@ static void draw_settings(GContext *ctx, GRect b) {
 
 static void layer_update(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
+  apply_tint();
   switch (s_state) {
     case ST_PLAYING:
       draw_game(ctx, b);
@@ -1435,6 +1591,7 @@ static void init(void) {
   srand(time(NULL));
   pick_language();
   load_progress();
+  sfx_load();
   apply_backlight();
 
   s_f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);

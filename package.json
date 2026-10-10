@@ -1,7 +1,7 @@
 {
   "name": "PebbleDiver",
   "author": "mrtruebeliever",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "license": "MIT",
   "keywords": ["pebble-app"],
   "private": true,
@@ -24,7 +24,9 @@
           "name": "IMG_MENU_ICON",
           "file": "images/menu_icon.png",
           "menuIcon": true
-        }
+        },
+        { "type": "raw", "name": "SFX_BUBBLE", "file": "sfx/bubble.raw" },
+        { "type": "raw", "name": "SFX_THUD", "file": "sfx/thud.raw" }
       ]
     }
   }

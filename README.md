@@ -64,3 +64,8 @@ pebble-tool:
 ```sh
 ~/.local/share/uv/tools/pebble-tool/bin/python tools/press.py select sleep:400 hold:select:1500 back
 ```
+
+De luchtbel en de botsing zijn samples die `tools/gen_sfx.py` berekent
+(`resources/sfx/*.raw`, 16 kHz 8-bit). Na een wijziging opnieuw draaien;
+`--wav <map>` schrijft er ook WAV-voorbeelden bij. De andere geluiden zijn
+noten in `src/c/main.c`, deels meerstemmig via `speaker_play_tracks()`.

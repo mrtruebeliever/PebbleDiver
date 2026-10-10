@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0
+
+- **Underwater sounds.** The chiptune square-wave blips are replaced by sounds
+  that belong under water: a glassy two-voice "ting" for a pearl, a real
+  bubble for an air bubble, a dull knock for a collision (both samples
+  synthesised by `tools/gen_sfx.py`), and a slow falling line with rising
+  bubbles when the air runs out. New sounds where there were none: a dark
+  two-note motif when a shark appears, a metallic clang for a sword parry
+  (it used to play the shop's purchase sound), a twinkle when the magic Pebble
+  appears, a three-voice shimmer when it is found, and a bright climb instead
+  of the drowning line on a new depth record. Low oxygen now repeats a soft
+  double beep every two seconds while the tank stays nearly empty. Uses
+  `speaker_play_tracks()` for the layered sounds.
+- **Follows the watch's speaker mute.** With the speaker muted in the watch
+  settings, the game plays silent (as in Quiet Time) and the Sound row in
+  Settings reads "Muted".
+- **The backlight follows the water (Pebble Time 2).** While diving, the
+  colour backlight runs from pale cyan at the surface to deep blue at 250 m,
+  and flashes red for a moment on a collision. Back on land (title, shop,
+  pause, game over) it is the watch's own colour again.
+
 ## 1.1.0
 
 - **Sharks.** A new hazard that actively swims toward your depth instead of
