@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include "sprites.h"
 
 // ---------------------------------------------------------------------------
 // PebbleDiver — one-button dive game for Pebble Time 2 (emery)
@@ -8,9 +9,12 @@
 
 #define TICK_MS 33            // ~30 fps
 #define FP 8                  // 8.8 fixed point
-#define HUD_H 26
+#define HUD_H PBL_IF_ROUND_ELSE(44, 26)   // round: two HUD rows, inside the circle
+// Round (gabbro): menus are inset so their corners stay inside the circle.
+#define RX PBL_IF_ROUND_ELSE(30, 0)
+#define RY PBL_IF_ROUND_ELSE(16, 0)
 
-#define DIVER_X 46
+#define DIVER_X PBL_IF_ROUND_ELSE(72, 46)
 #define DIVER_R 8             // collision radius
 
 #define MAX_ENT 14
@@ -760,7 +764,7 @@ static void game_tick(void *data) {
   s_diver_y_fp += s_diver_vy_fp;
 
   int32_t y_min = (HUD_H + 10) << FP;
-  int32_t y_max = (b.size.h - 9) << FP;
+  int32_t y_max = (b.size.h - PBL_IF_ROUND_ELSE(30, 9)) << FP;
   if (s_diver_y_fp < y_min) { s_diver_y_fp = y_min; s_diver_vy_fp = 0; }
   if (s_diver_y_fp > y_max) { s_diver_y_fp = y_max; s_diver_vy_fp = 0; }
 
@@ -878,25 +882,37 @@ static void game_tick(void *data) {
 // Drawing
 // ---------------------------------------------------------------------------
 
+// Pixel-art sprites (tools/sprites.py) are stored as runs of same-coloured
+// pixels, so a frame is a few dozen plain fill_rects.
+static void draw_sprite_tinted(GContext *ctx, const Sprite *spr, int16_t x, int16_t y,
+                               const GColor *tint) {
+  uint8_t cur = 0xFF;
+  for (uint16_t i = 0; i < spr->count; i++) {
+    const SpriteRun *r = &spr->runs[i];
+    if (r->col != cur) {
+      cur = r->col;
+      graphics_context_set_fill_color(ctx, (tint && cur >= SPRITE_TINT) ? tint[cur - SPRITE_TINT]
+                                                                       : sprite_palette(cur));
+    }
+    graphics_fill_rect(ctx, GRect(x + r->x, y + r->y, r->len, 1), 0, GCornerNone);
+  }
+}
+
+static void draw_sprite(GContext *ctx, const Sprite *spr, int16_t x, int16_t y) {
+  draw_sprite_tinted(ctx, spr, x, y, NULL);
+}
+
+// Draws a sprite with its centre on (x, y).
+static void draw_centred(GContext *ctx, const Sprite *spr, int16_t x, int16_t y, const GColor *tint) {
+  draw_sprite_tinted(ctx, spr, x - spr->cx, y - spr->cy, tint);
+}
+
 static void draw_diver(GContext *ctx, int16_t x, int16_t y) {
   // Blink while invulnerable
   if (s_state == ST_PLAYING && s_invuln > 0 && (s_tick / 3) % 2 == 0) return;
-
-  // Fins (back)
-  graphics_context_set_fill_color(ctx, GColorWindsorTan);
-  graphics_fill_rect(ctx, GRect(x - 14, y - 3, 6, 4), 1, GCornersLeft);
-  // Air tank
-  graphics_context_set_fill_color(ctx, GColorLightGray);
-  graphics_fill_rect(ctx, GRect(x - 8, y - 9, 11, 4), 2, GCornersAll);
-  // Body
-  graphics_context_set_fill_color(ctx, GColorOrange);
-  graphics_fill_rect(ctx, GRect(x - 9, y - 5, 16, 10), 3, GCornersAll);
-  // Helmet (brass diving helmet)
-  graphics_context_set_fill_color(ctx, GColorBrass);
-  graphics_fill_circle(ctx, GPoint(x + 8, y - 3), 5);
-  // Visor
-  graphics_context_set_fill_color(ctx, GColorOxfordBlue);
-  graphics_fill_circle(ctx, GPoint(x + 9, y - 3), 2);
+  // Fins kick between two frames
+  const Sprite *spr = (s_tick / 5) % 2 ? &SPR_SWIM1 : &SPR_SWIM0;
+  draw_sprite(ctx, spr, x - spr->cx, y - spr->cy);
 }
 
 static GColor magic_color(uint32_t t) {
@@ -917,98 +933,46 @@ static void draw_magic_pebble(GContext *ctx, GPoint p, int16_t r) {
   graphics_draw_pixel(ctx, GPoint(p.x + r / 2, p.y + r / 3));
 }
 
-static void draw_entity(GContext *ctx, Entity *e, GColor water) {
+static const Sprite *const ROCK_SPRITES[] = {
+  &SPR_ROCK9, &SPR_ROCK10, &SPR_ROCK11, &SPR_ROCK12, &SPR_ROCK13 };
+
+// Shark tints (light, body, back): cool grey-teal while it closes in, red
+// once it's in the strike-or-parry corridor -- the readable "act now" cue.
+static const GColor SHARK_CALM[3] = {
+  {.argb = GColorLightGrayARGB8}, {.argb = GColorCadetBlueARGB8}, {.argb = GColorMidnightGreenARGB8} };
+static const GColor SHARK_DANGER[3] = {
+  {.argb = GColorMelonARGB8}, {.argb = GColorRedARGB8}, {.argb = GColorDarkCandyAppleRedARGB8} };
+
+static void draw_entity(GContext *ctx, Entity *e) {
   int16_t x = e->x_fp >> FP;
   switch (e->type) {
-    case ENT_ROCK:
-      graphics_context_set_fill_color(ctx, GColorDarkGray);
-      graphics_fill_circle(ctx, GPoint(x, e->y), e->r);
-      graphics_fill_circle(ctx, GPoint(x + e->r / 2, e->y + 2), e->r - 3);
-      // Two-tone on purpose. A dark-grey rock against the 90-150 m water
-      // (CobaltBlue) measures 1.02:1 -- the thing that ends your run is
-      // invisible exactly where the scroll is fastest. No single flat colour
-      // fixes it, because the water spans #00AAFF to #0000AA; but where the
-      // light outline is weakest (the shallow cyan band) the dark body is at
-      // its strongest, so the pair reads at every depth.
-      graphics_context_set_stroke_color(ctx, GColorLightGray);
-      graphics_draw_circle(ctx, GPoint(x, e->y), e->r);
-      graphics_context_set_fill_color(ctx, GColorLightGray);
-      graphics_fill_circle(ctx, GPoint(x - e->r / 3, e->y - e->r / 3), 2);
+    case ENT_ROCK: {
+      int r = e->r < 9 ? 9 : (e->r > 13 ? 13 : e->r);
+      draw_centred(ctx, ROCK_SPRITES[r - 9], x, e->y, NULL);
       break;
+    }
     case ENT_JELLY: {
-      graphics_context_set_fill_color(ctx, GColorShockingPink);
-      graphics_fill_circle(ctx, GPoint(x, e->y), 7);
-      graphics_context_set_fill_color(ctx, water);
-      graphics_fill_rect(ctx, GRect(x - 8, e->y + 1, 17, 8), 0, GCornerNone);
-      graphics_context_set_stroke_color(ctx, GColorRichBrilliantLavender);
-      for (int t = -1; t <= 1; t++) {
-        int16_t tx = x + t * 4;
-        int16_t sway = (sin_lookup((e->phase + t * 9000) % TRIG_MAX_ANGLE) * 2 / TRIG_MAX_RATIO);
-        graphics_draw_line(ctx, GPoint(tx, e->y + 1), GPoint(tx + sway, e->y + 7));
-      }
+      bool f = ((s_tick + e->phase) / 6) % 2;
+      draw_centred(ctx, f ? &SPR_JELLY1 : &SPR_JELLY0, x, e->y, NULL);
       break;
     }
     case ENT_PEARL:
-      graphics_context_set_stroke_color(ctx, GColorLightGray);
-      graphics_draw_circle(ctx, GPoint(x, e->y), 4);
-      graphics_context_set_fill_color(ctx, GColorWhite);
-      graphics_fill_circle(ctx, GPoint(x, e->y), 3);
+      draw_centred(ctx, &SPR_PEARL, x, e->y, NULL);
       break;
     case ENT_BUBBLE:
-      graphics_context_set_stroke_color(ctx, GColorWhite);
-      graphics_draw_circle(ctx, GPoint(x, e->y), 5);
-      graphics_draw_pixel(ctx, GPoint(x - 2, e->y - 2));
+      draw_centred(ctx, &SPR_BUBBLE, x, e->y, NULL);
       break;
     case ENT_PEBBLE:
       draw_magic_pebble(ctx, GPoint(x, e->y), 6);
       break;
     case ENT_SHARK: {
-      // Grey while closing in; flips to red (plus a ring) once it's in the
-      // strike-or-parry corridor — the readable cue for "act now". Body is a
-      // wide, short oval (not a full circle) with pointed nose/tail and a
-      // triangular dorsal fin, so it reads as a small shark rather than a
-      // coloured ball. Travels right-to-left, so the nose points left.
+      // Travels right-to-left, nose first; the tail wags.
       bool danger = shark_in_range(e);
-      GColor body = danger ? GColorRed : GColorDarkGray;
-      int16_t r = e->r;
-      int16_t wag = sin_lookup(e->phase) * 3 / TRIG_MAX_RATIO;
-      GPoint center = GPoint(x, e->y);
-
-      graphics_context_set_fill_color(ctx, body);
-      graphics_fill_rect(ctx, GRect(x - r - 2, e->y - r / 2 - 1, 2 * r + 4, r + 2), 4, GCornersAll);
-
-      GPathInfo nose_info = {
-        .num_points = 3,
-        .points = (GPoint[]){ {x - r - 7, e->y}, {x - r + 1, e->y - 4}, {x - r + 1, e->y + 4} }
-      };
-      GPath *nose = gpath_create(&nose_info);
-      gpath_draw_filled(ctx, nose);
-      gpath_destroy(nose);
-
-      GPathInfo tail_info = {
-        .num_points = 3,
-        .points = (GPoint[]){ {x + r - 1, e->y - 4}, {x + r - 1, e->y + 4}, {x + r + 7, e->y + wag} }
-      };
-      GPath *tail = gpath_create(&tail_info);
-      gpath_draw_filled(ctx, tail);
-      gpath_destroy(tail);
-
-      GPathInfo fin_info = {
-        .num_points = 3,
-        .points = (GPoint[]){ {x - 3, e->y - r / 2 - 1}, {x + 3, e->y - r / 2 - 1}, {x, e->y - r - 6} }
-      };
-      GPath *fin = gpath_create(&fin_info);
-      gpath_draw_filled(ctx, fin);
-      gpath_destroy(fin);
-
-      graphics_context_set_fill_color(ctx, GColorWhite);
-      graphics_fill_circle(ctx, GPoint(x - r / 2, e->y - 1), 2);
-      graphics_context_set_fill_color(ctx, GColorBlack);
-      graphics_fill_circle(ctx, GPoint(x - r / 2, e->y - 1), 1);
-
+      draw_centred(ctx, (s_tick / 4) % 2 ? &SPR_SHARK1 : &SPR_SHARK0, x, e->y,
+                   danger ? SHARK_DANGER : SHARK_CALM);
       if (danger) {
         graphics_context_set_stroke_color(ctx, GColorWhite);
-        graphics_draw_circle(ctx, center, r + 5);
+        graphics_draw_circle(ctx, GPoint(x, e->y), e->r + 11);
       }
       break;
     }
@@ -1024,13 +988,14 @@ static void draw_hud(GContext *ctx, GRect b) {
   char buf[16];
   graphics_context_set_text_color(ctx, GColorWhite);
 
-  // Depth
+  // Depth (round: under the oxygen bar, left of centre)
   snprintf(buf, sizeof(buf), "%ldm", (long)depth_m());
-  graphics_draw_text(ctx, buf, s_f18b, GRect(4, 0, 56, 22),
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, buf, s_f18b, PBL_IF_ROUND_ELSE(GRect(56, 18, 66, 22), GRect(4, 0, 56, 22)),
+                     GTextOverflowModeTrailingEllipsis,
+                     PBL_IF_ROUND_ELSE(GTextAlignmentRight, GTextAlignmentLeft), NULL);
 
   // Oxygen bar
-  GRect bar = GRect(64, 9, 66, 9);
+  GRect bar = PBL_IF_ROUND_ELSE(GRect(b.size.w / 2 - 35, 9, 70, 9), GRect(64, 9, 66, 9));
   graphics_context_set_stroke_color(ctx, GColorWhite);
   graphics_draw_rect(ctx, bar);
   int32_t frac_w = (bar.size.w - 2) * s_oxygen_ms / s_max_oxygen_ms;
@@ -1044,9 +1009,10 @@ static void draw_hud(GContext *ctx, GRect b) {
 
   // Pearls
   graphics_context_set_fill_color(ctx, GColorWhite);
-  graphics_fill_circle(ctx, GPoint(b.size.w - 56, 13), 4);
+  graphics_fill_circle(ctx, PBL_IF_ROUND_ELSE(GPoint(140, 31), GPoint(b.size.w - 56, 13)), 4);
   snprintf(buf, sizeof(buf), "%ld", (long)s_run_pearls);
-  graphics_draw_text(ctx, buf, s_f18b, GRect(b.size.w - 48, 0, 44, 22),
+  graphics_draw_text(ctx, buf, s_f18b,
+                     PBL_IF_ROUND_ELSE(GRect(148, 18, 56, 22), GRect(b.size.w - 48, 0, 44, 22)),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
@@ -1068,7 +1034,7 @@ static void draw_game(GContext *ctx, GRect b) {
   }
 
   for (int i = 0; i < MAX_ENT; i++) {
-    if (s_ents[i].type != ENT_NONE) draw_entity(ctx, &s_ents[i], water);
+    if (s_ents[i].type != ENT_NONE) draw_entity(ctx, &s_ents[i]);
   }
 
   draw_diver(ctx, DIVER_X, s_diver_y_fp >> FP);
@@ -1077,7 +1043,7 @@ static void draw_game(GContext *ctx, GRect b) {
   // First-run onboarding: a control hint just under the HUD for the opening
   // stretch of a player's very first dive (no record yet), then it fades out.
   if (s_best_m == 0 && depth_m() < 12) {
-    GRect box = GRect(6, HUD_H + 4, b.size.w - 12, 22);
+    GRect box = GRect(6 + RX, HUD_H + 4, b.size.w - 12 - 2 * RX, 22);
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, box, 4, GCornersAll);
     graphics_context_set_text_color(ctx, GColorWhite);
@@ -1090,7 +1056,7 @@ static void draw_game(GContext *ctx, GRect b) {
 static void draw_center_text(GContext *ctx, const char *text, GFont font,
                              int16_t y, int16_t h, GRect b, GColor color) {
   graphics_context_set_text_color(ctx, color);
-  graphics_draw_text(ctx, text, font, GRect(4, y, b.size.w - 8, h),
+  graphics_draw_text(ctx, text, font, GRect(4 + RX, y, b.size.w - 8 - 2 * RX, h),
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
@@ -1167,14 +1133,14 @@ static void draw_shop(GContext *ctx, GRect b) {
   char buf[40];
   GColor head = s_shop_flash ? GColorRed : GColorWhite;
   graphics_context_set_text_color(ctx, head);
-  graphics_draw_text(ctx, S(S_SHOP_TITLE), s_f24b, GRect(8, 2, 110, 30),
+  graphics_draw_text(ctx, S(S_SHOP_TITLE), s_f24b, PBL_IF_ROUND_ELSE(GRect(54, 12, 90, 30), GRect(8, 2, 110, 30)),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   // Pearl balance top-right
   graphics_context_set_fill_color(ctx, GColorWhite);
-  graphics_fill_circle(ctx, GPoint(b.size.w - 56, 18), 4);
+  graphics_fill_circle(ctx, GPoint(b.size.w - 56 - PBL_IF_ROUND_ELSE(50, 0), 18 + PBL_IF_ROUND_ELSE(10, 0)), 4);
   snprintf(buf, sizeof(buf), "%ld", (long)s_pearls);
   graphics_context_set_text_color(ctx, head);
-  graphics_draw_text(ctx, buf, s_f18b, GRect(b.size.w - 48, 7, 44, 22),
+  graphics_draw_text(ctx, buf, s_f18b, GRect(b.size.w - 48 - PBL_IF_ROUND_ELSE(50, 0), 7 + PBL_IF_ROUND_ELSE(10, 0), 44, 22),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
   const char *names[4] = {S(S_ITEM_TANK), S(S_ITEM_FINS), S(S_ITEM_LAMP), S(S_ITEM_SWORD)};
@@ -1182,8 +1148,8 @@ static void draw_shop(GContext *ctx, GRect b) {
   int8_t levels[4] = {s_tank, s_fins, s_lamp, s_sword};
 
   for (int i = 0; i < 4; i++) {
-    int16_t y = 32 + i * 42;
-    GRect card = GRect(6, y, b.size.w - 12, 38);
+    int16_t y = PBL_IF_ROUND_ELSE(46 + i * 40, 32 + i * 42);
+    GRect card = GRect(6 + RX, y, b.size.w - 12 - 2 * RX, 38);
     graphics_context_set_fill_color(ctx, i == s_shop_sel ? GColorCobaltBlue : GColorDukeBlue);
     graphics_fill_rect(ctx, card, 4, GCornersAll);
     if (i == s_shop_sel) {
@@ -1192,15 +1158,16 @@ static void draw_shop(GContext *ctx, GRect b) {
     }
 
     graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, names[i], s_f18b, GRect(card.origin.x + 6, y + 1, 136, 18),
+    graphics_draw_text(ctx, names[i], s_f18b, GRect(card.origin.x + 6, y + 1, card.size.w - 66, 20),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, GColorCeleste);
-    graphics_draw_text(ctx, descs[i], s_f14, GRect(card.origin.x + 6, y + 17, 130, 14),
+    graphics_draw_text(ctx, descs[i], s_f14, GRect(card.origin.x + 6, y + 19, card.size.w - 66, 16),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    // Level pips
+    // Level pips, top right, with the price (or MAX) under them
+    int16_t rx = card.origin.x + card.size.w - 52;
     for (int p = 0; p < MAX_LEVEL; p++) {
-      GRect pip = GRect(card.origin.x + 6 + p * 10, y + 30, 6, 6);
+      GRect pip = GRect(rx + p * 9, y + 6, 6, 6);
       if (p < levels[i]) {
         graphics_context_set_fill_color(ctx, GColorGreen);
         graphics_fill_rect(ctx, pip, 1, GCornersAll);
@@ -1210,23 +1177,22 @@ static void draw_shop(GContext *ctx, GRect b) {
       }
     }
 
-    // Price / MAX
     graphics_context_set_text_color(ctx, GColorPastelYellow);
     if (levels[i] >= MAX_LEVEL) {
       snprintf(buf, sizeof(buf), "MAX");
     } else {
       graphics_context_set_fill_color(ctx, GColorWhite);
-      graphics_fill_circle(ctx, GPoint(card.origin.x + card.size.w - 46, y + 17), 3);
+      graphics_fill_circle(ctx, GPoint(rx + 3, y + 26), 3);
       snprintf(buf, sizeof(buf), "%ld", (long)SHOP_COST[(int)levels[i]]);
     }
     graphics_draw_text(ctx, buf, s_f18b,
-                       GRect(card.origin.x + card.size.w - 40, y + 8, 36, 18),
+                       GRect(levels[i] >= MAX_LEVEL ? rx : rx + 10, y + 14, 44, 20),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 
   // Once everything is bought, the shop whispers about the legend instead
   draw_center_text(ctx, all_upgrades_max() ? S(S_LEGEND) : S(S_SHOP_HINT), s_f14,
-                   b.size.h - 30, 28, b,
+                   b.size.h - PBL_IF_ROUND_ELSE(52, 30), 28, b,
                    all_upgrades_max() ? GColorCeleste : GColorLightGray);
 }
 
@@ -1255,15 +1221,17 @@ static void draw_settings(GContext *ctx, GRect b) {
   graphics_fill_rect(ctx, b, 0, GCornerNone);
 
   graphics_context_set_text_color(ctx, GColorWhite);
-  graphics_draw_text(ctx, S(S_SETTINGS_TITLE), s_f24b, GRect(8, 4, b.size.w - 16, 30),
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, S(S_SETTINGS_TITLE), s_f24b,
+                     GRect(8 + RX, 4 + RY, b.size.w - 16 - 2 * RX, 30),
+                     GTextOverflowModeTrailingEllipsis,
+                     PBL_IF_ROUND_ELSE(GTextAlignmentCenter, GTextAlignmentLeft), NULL);
 
   const char *labels[NUM_SETTINGS] = {
     S(S_OPT_BACKLIGHT), S(S_OPT_VIBRATION), S(S_OPT_SOUND), S(S_OPT_RESET) };
 
   for (int i = 0; i < NUM_SETTINGS; i++) {
-    int16_t y = 40 + i * 34;
-    GRect row = GRect(6, y, b.size.w - 12, 30);
+    int16_t y = 40 + RY + i * 34;
+    GRect row = GRect(6 + RX, y, b.size.w - 12 - 2 * RX, 30);
     if (i == s_settings_sel) {
       graphics_context_set_fill_color(ctx, GColorCobaltBlue);
       graphics_fill_rect(ctx, row, 4, GCornersAll);
@@ -1311,7 +1279,7 @@ static void draw_settings(GContext *ctx, GRect b) {
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
   }
 
-  draw_center_text(ctx, S(S_SETTINGS_HINT), s_f14, b.size.h - 38, 36, b, GColorLightGray);
+  draw_center_text(ctx, S(S_SETTINGS_HINT), s_f14, b.size.h - 38 - 2 * RY, 36, b, GColorLightGray);
 }
 
 static void layer_update(Layer *layer, GContext *ctx) {

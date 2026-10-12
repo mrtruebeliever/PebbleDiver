@@ -1,72 +1,101 @@
 #!/usr/bin/env python3
-"""Generates PebbleDiver's launcher menu icon: a tiny pixel-art diver,
-matching the in-game sprite's colors (see draw_diver() in src/c/main.c) —
-an orange rounded body, a brass diving helmet with a dark visor, a gray air
-tank, and a couple of trailing bubbles.
+"""Generates PebbleDiver's launcher menu icon: the brass diving helmet
+with the wide-eyed diver behind its porthole, matching tools/sprites.py.
+
+The launcher draws menu icons in four greys (black, dark grey, light grey,
+white) on white, so the icon is crisp pixel art in Pebble palette colours
+chosen for their grey level, with every part outlined in black; pale colours
+without an outline would vanish.
 
 Output:
-  resources/images/menu_icon.png   25x25   diver on transparent
+  resources/images/menu_icon.png   25x25 on transparent
 
-Rendered supersampled and downsampled for clean edges. Needs Pillow; run
-from the project root inside the icon venv:
-    source .art-venv/bin/activate && python3 tools/gen_icon.py
+Run from the project root (needs Pillow):  python3 tools/gen_icon.py
 """
 import os
-from PIL import Image, ImageDraw
 
-SS = 8
+from PIL import Image
 
-ORANGE = (0xFF, 0xAA, 0x00, 255)      # GColorOrange
-TAN = (0xAA, 0x55, 0x00, 255)         # GColorWindsorTan (fins)
-LIGHT_GRAY = (0xAA, 0xAA, 0xAA, 255)  # GColorLightGray (tank)
-BRASS = (0xAA, 0xAA, 0x55, 255)       # GColorBrass (helmet)
-OXFORD_BLUE = (0x00, 0x00, 0x55, 255) # GColorOxfordBlue (visor)
-WHITE = (255, 255, 255, 255)
+N = 25
+PAL = {
+    "K": (0x00, 0x00, 0x00), "W": (0xFF, 0xFF, 0xFF), "L": (0xAA, 0xAA, 0xAA),
+    "D": (0x55, 0x55, 0x55), "R": (0xFF, 0x00, 0x00), "r": (0xAA, 0x00, 0x00),
+    "o": (0xFF, 0x55, 0x55), "Y": (0xFF, 0xFF, 0x00), "y": (0xFF, 0xAA, 0x00),
+    "i": (0xFF, 0xFF, 0x55), "A": (0xAA, 0xAA, 0x55), "a": (0x55, 0x55, 0x00),
+    "S": (0xFF, 0xAA, 0x55), "s": (0xFF, 0x55, 0x00), "N": (0xAA, 0x55, 0x00),
+    "n": (0x55, 0x00, 0x00), "b": (0x00, 0x00, 0x55), "B": (0x00, 0x55, 0xAA),
+    "c": (0x00, 0x55, 0xFF), "C": (0xAA, 0xFF, 0xFF), "E": (0x00, 0xFF, 0xAA),
+    "e": (0x00, 0xAA, 0x55), "p": (0x00, 0x55, 0x00), "M": (0x55, 0xAA, 0x00),
+    "Z": (0xAA, 0xFF, 0x55), "T": (0xAA, 0xFF, 0xAA), "m": (0xAA, 0x00, 0xAA),
+    "P": (0x00, 0xAA, 0x00), "G": (0x55, 0xAA, 0xAA), "g": (0x00, 0x55, 0x55),
+}
 
 
-def draw_diver(W):
-    """Draws the diver sprite filling a WxW transparent RGBA image."""
-    img = Image.new("RGBA", (W, W), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+def disc(cx, cy, r):
+    return {(x, y) for y in range(N) for x in range(N) if (x - cx) ** 2 + (y - cy) ** 2 <= r * r}
 
-    def s(v):
-        return v * W
 
-    cx, cy = s(0.46), s(0.56)  # body center
+def ell(cx, cy, rx, ry):
+    return {(x, y) for y in range(N) for x in range(N)
+            if ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1}
 
-    # Fin (back, lower-left).
-    d.rounded_rectangle([cx - s(0.34), cy + s(0.06), cx - s(0.16), cy + s(0.24)],
-                         radius=s(0.03), fill=TAN)
-    # Air tank (above the body).
-    d.rounded_rectangle([cx - s(0.20), cy - s(0.34), cx + s(0.06), cy - s(0.14)],
-                         radius=s(0.05), fill=LIGHT_GRAY)
-    # Body.
-    d.rounded_rectangle([cx - s(0.22), cy - s(0.14), cx + s(0.18), cy + s(0.20)],
-                         radius=s(0.10), fill=ORANGE)
-    # Helmet (brass diving helmet, upper right).
-    hx, hy, hr = cx + s(0.20), cy - s(0.10), s(0.19)
-    d.ellipse([hx - hr, hy - hr, hx + hr, hy + hr], fill=BRASS)
-    # Visor.
-    vr = s(0.075)
-    d.ellipse([hx + s(0.03) - vr, hy - vr, hx + s(0.03) + vr, hy + vr], fill=OXFORD_BLUE)
 
-    # Bubbles trailing up-right.
-    for bx, by, br in ((s(0.82), s(0.20), s(0.055)), (s(0.70), s(0.06), s(0.035))):
-        d.ellipse([bx - br, by - br, bx + br, by + br], outline=WHITE, width=max(1, int(s(0.012))))
+def rect(x0, y0, x1, y1):
+    return {(x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)}
 
+
+def part(g, cells, shade, diag=False):
+    nb = [(1, 0), (-1, 0), (0, 1), (0, -1)] + ([(1, 1), (-1, -1), (1, -1), (-1, 1)] if diag else [])
+    for (x, y) in cells:
+        for dx, dy in nb:
+            p = (x + dx, y + dy)
+            if p not in cells and 0 <= p[0] < N and 0 <= p[1] < N:
+                g[p[1]][p[0]] = "K"
+    for (x, y) in cells:
+        if 0 <= x < N and 0 <= y < N:
+            g[y][x] = shade(x, y) if callable(shade) else shade
+
+
+def new():
+    return [["."] * N for _ in range(N)]
+
+
+def to_img(g):
+    img = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    for y in range(N):
+        for x in range(N):
+            if g[y][x] != ".":
+                img.putpixel((x, y), PAL[g[y][x]] + (255,))
     return img
 
 
-def menu_icon(size):
-    W = size * SS
-    glyph = draw_diver(W)
-    return glyph.resize((size, size), Image.LANCZOS)
+
+def art():
+    g = new()
+    cx, cy = 12, 12
+    helm = disc(cx, cy, 11.3)
+    part(g, helm, lambda x, y: "i" if (x - cx) + (y - cy) < -12 else
+         ("A" if (x - cx) + 0.8 * (y - cy) < 6 else "a"))
+    rim = disc(13, 12, 7.4)
+    part(g, rim, "L")
+    port = disc(13, 12, 5.8)
+    part(g, port, "S")
+    for (x, y), c in {(11, 10): "W", (12, 10): "W", (11, 11): "W", (12, 11): "K",
+                      (11, 12): "W", (12, 12): "K", (15, 10): "W", (16, 10): "W",
+                      (15, 11): "W", (16, 11): "K", (15, 12): "W", (16, 12): "K",
+                      (13, 15): "N", (14, 15): "N", (10, 14): "o", (17, 14): "o",
+                      (9, 9): "C", (10, 8): "C", (9, 10): "W",
+                      }.items():
+        g[y][x] = c
+    for (x, y) in ((3, 12), (21, 12), (12, 2), (12, 22), (5, 5), (19, 19), (5, 19), (19, 5)):
+        if g[y][x] in "Aia":
+            g[y][x] = "D"
+    return g
 
 
 def main():
     os.makedirs("resources/images", exist_ok=True)
-
-    menu_icon(25).save("resources/images/menu_icon.png")
+    to_img(art()).save("resources/images/menu_icon.png")
     print("wrote resources/images/menu_icon.png (25x25)")
 
 

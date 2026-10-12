@@ -1,6 +1,7 @@
 # PebbleDiver
 
-Een one-button duikspel voor de Pebble Time 2 (emery).
+Een one-button duikspel voor de Pebble Time 2 (emery), ook gebouwd voor de
+ronde Pebble Round 2 (gabbro).
 
 Houd **SELECT** ingedrukt om omhoog te zwemmen, houd **OMLAAG** ingedrukt om
 sneller te dalen, laat los om te zinken. Ontwijk rotsen en kwallen, verzamel

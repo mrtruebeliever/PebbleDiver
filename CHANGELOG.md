@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.0
+
+- **Sega-style pixel art.** The diver is a pixel sprite now: a brass helmet with
+  a wide-eyed face behind the porthole, an air tank and kicking fins. Rocks,
+  jellyfish, the shark, pearls and bubbles match, with black outlines that read
+  at every depth. The shark still turns red when it is about to strike.
+- **Shop:** the item descriptions no longer run over the level boxes; the boxes
+  and the price sit on the right of each card.
+- **Pebble Round 2 (gabbro):** builds for the round screen, with the HUD, shop
+  and settings pulled inside the circle.
+- New launcher icon (readable in the launcher's greys), banner, store icons,
+  screenshots (also for the Round 2) and demo GIF.
+
 ## 1.2.0
 
 - **Underwater sounds.** The chiptune square-wave blips are replaced by sounds

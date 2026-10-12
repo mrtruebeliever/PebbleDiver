@@ -1,179 +1,200 @@
 #!/usr/bin/env python3
-"""Generates PebbleDiver's Rebble appstore marketing art: the two store icons
-and the listing banner. Pixel-art style matching the in-game diver sprite
-(see draw_diver() in src/c/main.c) on a deep-ocean vertical gradient, plus a
-glowing magic Pebble teaser (see the endgame's color-shifting magic Pebble).
+"""Generates PebbleDiver's Rebble appstore art from the in-game sprites
+(tools/sprites.py), scaled up with NEAREST so it stays crisp pixel art, in
+the same style as Pebble Peaks' store art.
 
 Outputs:
-  store/icon-80.png            80x80    diver + magic-pebble teaser
-  store/icon-144.png           144x144  same composition, larger
-  store/banner-720x320.png     720x320  wide scene + title/subtitle text
+  store/icon-80.png            80x80    (40x40 canvas, x2)
+  store/icon-144.png           144x144  (36x36 canvas, x4)
+  store/banner-720x320.png     720x320  (180x80 canvas, x4)
 
-Rendered supersampled and downsampled for clean edges. Needs Pillow; run
-from the project root inside the icon venv, or with the pebble-tool venv
-python (it already has Pillow):
-    ~/.local/share/uv/tools/pebble-tool/bin/python tools/gen_marketing.py
+Run from the project root (needs Pillow):  python3 tools/gen_marketing.py
 """
-import math
 import os
+import random
+import sys
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
-SS = 4  # supersampling factor for the icons
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sprites import ALL, PALETTE  # noqa: E402
 
-# Colors matching the in-game palette (Pebble's 64-color RGB values).
-ORANGE = (0xFF, 0xAA, 0x00, 255)       # body
-TAN = (0xAA, 0x55, 0x00, 255)          # fin
-LIGHT_GRAY = (0xAA, 0xAA, 0xAA, 255)   # tank
-BRASS = (0xAA, 0xAA, 0x55, 255)        # helmet
-OXFORD_BLUE = (0x00, 0x00, 0x55, 255)  # visor
-WHITE = (255, 255, 255, 255)
-MAGENTA = (0xFF, 0x00, 0xFF, 255)      # magic Pebble
-
-SKY_BLUE = (0x55, 0xB6, 0xE8)          # gradient top (shallow water)
-DEEP_BLUE = (0x03, 0x08, 0x22)         # gradient bottom (deep water)
-
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+C = {k: v[1] + (255,) for k, v in PALETTE.items()}
+C.update({
+    "j": (0xAA, 0x00, 0xAA, 255),   # Purple
+    "M": (0xFF, 0x00, 0xFF, 255),   # Magenta (magic Pebble)
+    "G": (0x00, 0xAA, 0x55, 255),   # JaegerGreen (kelp)
+    "g": (0x00, 0x55, 0x00, 255),   # DarkGreen
+})
+# The game's water darkens with depth: these are its bands, top to bottom.
+WATER = [(0x00, 0xAA, 0xFF), (0x00, 0x55, 0xFF), (0x00, 0x55, 0xAA),
+         (0x00, 0x00, 0xAA), (0x00, 0x00, 0x55)]
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 
-def vertical_gradient(w, h, top, bottom):
-    img = Image.new("RGB", (w, h))
+def water(img):
+    w, h = img.size
     px = img.load()
+    n = len(WATER)
     for y in range(h):
-        t = y / max(1, h - 1)
-        row = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+        t = (y / max(1, h - 1)) * (n - 1)
+        i = min(int(t), n - 2)
+        frac = t - i
         for x in range(w):
-            px[x, y] = row
-    return img.convert("RGBA")
+            # ordered 2x2 dither between neighbouring palette bands
+            thr = ((x & 1) + 2 * (y & 1)) / 4.0 + 0.125
+            px[x, y] = WATER[i + (1 if frac > thr else 0)] + (255,)
 
 
-def draw_diver(canvas, cx, cy, scale):
-    """Draws the diver sprite centered at (cx, cy), `scale` px tall (roughly)."""
-    d = ImageDraw.Draw(canvas)
-
-    def s(v):
-        return v * scale
-
-    # Fin (back, lower-left).
-    d.rounded_rectangle([cx - s(0.34), cy + s(0.06), cx - s(0.16), cy + s(0.24)],
-                         radius=s(0.03), fill=TAN)
-    # Air tank.
-    d.rounded_rectangle([cx - s(0.20), cy - s(0.34), cx + s(0.06), cy - s(0.14)],
-                         radius=s(0.05), fill=LIGHT_GRAY)
-    # Body.
-    d.rounded_rectangle([cx - s(0.22), cy - s(0.14), cx + s(0.18), cy + s(0.20)],
-                         radius=s(0.10), fill=ORANGE)
-    # Helmet.
-    hx, hy, hr = cx + s(0.20), cy - s(0.10), s(0.19)
-    d.ellipse([hx - hr, hy - hr, hx + hr, hy + hr], fill=BRASS)
-    # Visor.
-    vr = s(0.075)
-    d.ellipse([hx + s(0.03) - vr, hy - vr, hx + s(0.03) + vr, hy + vr], fill=OXFORD_BLUE)
+def blit(img, name, x, y, scale=1):
+    for j, row in enumerate(ALL[name]):
+        for i, ch in enumerate(row):
+            if ch != ".":
+                for sy in range(scale):
+                    for sx in range(scale):
+                        xx, yy = x + i * scale + sx, y + j * scale + sy
+                        if 0 <= xx < img.width and 0 <= yy < img.height:
+                            img.putpixel((xx, yy), C[ch])
 
 
-def draw_bubble(canvas, x, y, r, width=2):
-    d = ImageDraw.Draw(canvas)
-    d.ellipse([x - r, y - r, x + r, y + r], outline=WHITE, width=width)
+def stamp(img, rows, x, y):
+    for j, row in enumerate(rows):
+        for i, ch in enumerate(row):
+            if ch != "." and 0 <= x + i < img.width and 0 <= y + j < img.height:
+                img.putpixel((x + i, y + j), C[ch])
 
 
-def draw_magic_pebble(canvas, x, y, r):
-    """A small glowing magenta pebble with a soft glow halo and a white
-    sparkle ring, teasing the endgame's color-shifting magic Pebble."""
-    W, H = canvas.size
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    gr = r * 2.6
-    gd.ellipse([x - gr, y - gr, x + gr, y + gr], fill=(*MAGENTA[:3], 130))
-    glow = glow.filter(ImageFilter.GaussianBlur(r * 0.9))
-    canvas.alpha_composite(glow)
-
-    d = ImageDraw.Draw(canvas)
-    d.ellipse([x - r, y - r, x + r, y + r], fill=MAGENTA)
-    hl = r * 0.35
-    d.ellipse([x - r * 0.35 - hl * 0.5, y - r * 0.35 - hl * 0.5,
-               x - r * 0.35 + hl * 0.5, y - r * 0.35 + hl * 0.5], fill=WHITE)
-
-    # Sparkle flares (four-pointed twinkle), not a full ring, so it doesn't
-    # read as a reticle.
-    def flare(fx, fy, length, lw):
-        d.line([(fx - length, fy), (fx + length, fy)], fill=WHITE, width=lw)
-        d.line([(fx, fy - length), (fx, fy + length)], fill=WHITE, width=lw)
-
-    flare(x + r * 1.9, y - r * 1.4, r * 0.55, max(1, int(r * 0.10)))
-    flare(x - r * 1.6, y + r * 1.7, r * 0.32, max(1, int(r * 0.07)))
-    d.ellipse([x + r * 2.6 - r * 0.1, y - r * 0.3 - r * 0.1,
-               x + r * 2.6 + r * 0.1, y - r * 0.3 + r * 0.1], fill=WHITE)
+BUBBLE = [".WW.", "W..W", "W..W", ".WW."]
+BUBBLE_S = [".W.", "W.W", ".W."]
+MAGIC = [
+    "..KKKKK..",
+    ".KMMMMMK.",
+    "KMWWMMMMK",
+    "KMWMMMMMK",
+    "KMMMMMMjK",
+    "KMMMMMjjK",
+    ".KMMMjjK.",
+    "..KKKKK..",
+]
 
 
-def store_icon(size):
-    W = size * SS
-    canvas = vertical_gradient(W, W, SKY_BLUE, DEEP_BLUE)
+def kelp(img, x, base, h, phase):
+    for k in range(h):
+        sway = (1 if ((k + phase) // 3) % 2 else 0)
+        y = base - k
+        for dx, c in ((0, "K"), (1, "G"), (2, "g"), (3, "K")):
+            xx = x + sway + dx
+            if 0 <= xx < img.width and 0 <= y < img.height:
+                img.putpixel((xx, y), C[c])
+    for dx in range(4):
+        img.putpixel((x + dx + (1 if ((h - 1 + phase) // 3) % 2 else 0), base - h), C["K"])
 
-    # A few ambient bubbles.
-    for bx, by, br in ((0.18, 0.15, 0.03), (0.28, 0.30, 0.02), (0.15, 0.42, 0.018)):
-        draw_bubble(canvas, bx * W, by * W, br * W, width=max(1, int(W * 0.006)))
 
-    draw_diver(canvas, 0.42 * W, 0.58 * W, 0.62 * W)
-    draw_magic_pebble(canvas, 0.78 * W, 0.24 * W, 0.09 * W)
+def seabed(img, top):
+    px = img.load()
+    for y in range(top, img.height):
+        for x in range(img.width):
+            edge = top + (1 if (x // 7) % 3 == 0 else 0) + (1 if (x // 3) % 5 == 0 else 0)
+            if y < edge:
+                continue
+            if y == edge:
+                c = "K"
+            elif y == edge + 1:
+                c = "S" if x % 4 else "y"
+            else:
+                c = "N" if (x * 3 + y * 5) % 7 else "S"
+            px[x, y] = C[c]
 
-    return canvas.resize((size, size), Image.LANCZOS)
+
+def rays(img, xs, top, bottom):
+    """Faint light shafts: every other pixel lightened one band."""
+    px = img.load()
+    for x0 in xs:
+        for y in range(top, bottom):
+            for k in range(4):
+                x = x0 + k + (y - top) // 3
+                if 0 <= x < img.width and (x + y) % 2 == 0:
+                    r, g, b, a = px[x, y]
+                    px[x, y] = (min(255, r + 0x55), min(255, g + 0x55), b, 255)
+
+
+def text(img, xy, s, size, fill, shade=None, shadow=(0, 0, 0x55, 255)):
+    """Thresholded bold text with a black outline and a drop shadow."""
+    W, H = img.size
+    f = ImageFont.truetype(FONT, size)
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).text(xy, s, font=f, fill=255)
+    mp = mask.point(lambda v: 255 if v > 127 else 0).load()
+    out = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ol = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    sh = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    op, olp, shp = out.load(), ol.load(), sh.load()
+    for y in range(H):
+        for x in range(W):
+            if mp[x, y]:
+                op[x, y] = C[shade] if shade and y > xy[1] + size * 0.52 else C[fill]
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if 0 <= x + dx < W and 0 <= y + dy < H:
+                            olp[x + dx, y + dy] = C["K"]
+    for y in range(H):
+        for x in range(W):
+            if olp[x, y][3] and x + 1 < W and y + 2 < H:
+                shp[x + 1, y + 2] = shadow
+    img.alpha_composite(sh)
+    img.alpha_composite(ol)
+    img.alpha_composite(out)
+
+
+def icon_canvas(n):
+    img = Image.new("RGBA", (n, n))
+    water(img)
+    rays(img, [n // 4, n // 2], 0, n)
+    seabed(img, n - 6)
+    kelp(img, n - 8, n - 6, n // 3, 0)
+    blit(img, "SWIM0", (n - 31) // 2, n // 2 - 11)
+    stamp(img, BUBBLE_S, n // 2 + 10, 3)
+    stamp(img, BUBBLE, n // 2 + 13, 8)
+    blit(img, "PEARL", 3, n - 14)
+    return img
 
 
 def banner():
-    W, H = 720, 320
-    canvas = vertical_gradient(W, H, SKY_BLUE, DEEP_BLUE)
-
-    # Ambient bubbles trailing up from the diver.
-    for bx, by, br in ((85, 55, 7), (120, 90, 5), (70, 130, 4), (145, 35, 4),
-                        (45, 85, 4), (105, 175, 4)):
-        draw_bubble(canvas, bx, by, br, width=2)
-
-    draw_diver(canvas, 110, 200, 210)
-    draw_magic_pebble(canvas, 600, 250, 30)
-
-    d = ImageDraw.Draw(canvas)
-    title_font = ImageFont.truetype(FONT_PATH, 54)
-    subtitle_font = ImageFont.truetype(FONT_PATH, 22)
-
-    title = "PebbleDiver"
-    subtitle = "A one-button deep-sea dive"
-    text_cx = 500  # right-of-center column, clear of the diver sprite
-
-    tb = d.textbbox((0, 0), title, font=title_font)
-    tw, th = tb[2] - tb[0], tb[3] - tb[1]
-    sb = d.textbbox((0, 0), subtitle, font=subtitle_font)
-    sw, sh = sb[2] - sb[0], sb[3] - sb[1]
-
-    block_h = th + 14 + sh
-    ty = H / 2 - block_h / 2 - tb[1]
-    tx = text_cx - tw / 2
-
-    # Soft dark backing so the text stays legible over the gradient/bubbles.
-    pad = 18
-    backing = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    bd = ImageDraw.Draw(backing)
-    bx0 = min(tx, text_cx - sw / 2) - pad
-    bx1 = max(tx + tw, text_cx - sw / 2 + sw) + pad
-    by0 = ty + tb[1] - pad
-    by1 = ty + tb[1] + block_h + pad
-    bd.rounded_rectangle([bx0, by0, bx1, by1], radius=14, fill=(0, 0, 0, 90))
-    canvas.alpha_composite(backing)
-
-    d.text((tx, ty), title, font=title_font, fill=WHITE)
-    d.text((text_cx - sw / 2, ty + th + 14), subtitle, font=subtitle_font, fill=(0xDD, 0xEE, 0xFF, 255))
-
-    return canvas
+    W, H = 180, 80
+    img = Image.new("RGBA", (W, H))
+    water(img)
+    rays(img, [86, 112, 140, 165], 0, 62)
+    seabed(img, 68)
+    blit(img, "ROCK11", 90, 56)
+    blit(img, "ROCK9", 162, 59)
+    kelp(img, 88, 68, 22, 0)
+    kelp(img, 114, 69, 14, 2)
+    kelp(img, 150, 68, 26, 1)
+    kelp(img, 174, 68, 18, 3)
+    blit(img, "JELLY0", 158, 3)
+    blit(img, "JELLY1", 96, 1)
+    blit(img, "SHARK0", 138, 38)
+    stamp(img, MAGIC, 120, 58)
+    for (x, y) in ((119, 55), (130, 62), (123, 67)):
+        img.putpixel((x, y), C["W"])
+    blit(img, "SWIM0", 104, 22)
+    for (x, y, big) in ((134, 18, False), (138, 11, True), (133, 5, False)):
+        stamp(img, BUBBLE if big else BUBBLE_S, x, y)
+    blit(img, "PEARL", 150, 26)
+    blit(img, "PEARL", 172, 30)
+    text(img, (6, 6), "PEBBLE", 17, "W", "L", shadow=(0, 0, 0x55, 255))
+    text(img, (6, 22), "DIVER", 28, "y", "s", shadow=(0, 0, 0x55, 255))
+    text(img, (8, 60), "Dive deep. Grab pearls.", 7, "W")
+    text(img, (8, 69), "Mind the air!", 7, "C")
+    return img
 
 
 def main():
     os.makedirs("store", exist_ok=True)
-
-    for sz in (80, 144):
-        store_icon(sz).save("store/icon-%d.png" % sz)
-        print("wrote store/icon-%d.png (%dx%d)" % (sz, sz, sz))
-
-    banner().save("store/banner-720x320.png")
-    print("wrote store/banner-720x320.png (720x320)")
+    icon_canvas(40).resize((80, 80), Image.NEAREST).save("store/icon-80.png")
+    icon_canvas(36).resize((144, 144), Image.NEAREST).save("store/icon-144.png")
+    banner().resize((720, 320), Image.NEAREST).save("store/banner-720x320.png")
+    print("wrote store/icon-80.png, icon-144.png, banner-720x320.png")
 
 
 if __name__ == "__main__":

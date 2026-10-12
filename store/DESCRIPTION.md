@@ -32,7 +32,8 @@ FEATURES
   a sword (UP or a screen tap) for a pearl payout.
 • Water darkens and the current quickens the deeper you dive, for a real
   sense of descent.
-• Made for the Pebble Time 2 (Emery) color screen.
+• Made for the Pebble Time 2 (Emery) color screen; also plays on the round
+  Pebble Round 2 (Gabbro), without sound there.
 • Plays entirely offline — no phone app, no internet connection needed.
 • Available in English, Nederlands, Français, Deutsch and Español, following
   your watch's system language automatically.
@@ -40,5 +41,5 @@ FEATURES
 
 **Category:** Games
 **Icons:** store/icon-80.png, store/icon-144.png
-**Screenshots:** store/screenshots/
+**Screenshots:** store/screenshots/ (Round 2: store/screenshots/gabbro/)
 **Demo:** store/pebblediver-demo.gif
